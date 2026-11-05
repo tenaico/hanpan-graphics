@@ -1,0 +1,80 @@
+name: Build web builds
+
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: Which web build
+        type: choice
+        options: [both, photo, illust]
+        default: both
+      release:
+        description: Publish the zips as GitHub releases
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.app }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [photo, illust]
+    steps:
+      - name: Skip an app not asked for
+        id: want
+        run: echo "run=${{ inputs.app == 'both' || inputs.app == matrix.app }}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        if: steps.want.outputs.run == 'true'
+      - uses: actions/setup-node@v4
+        if: steps.want.outputs.run == 'true'
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.want.outputs.run == 'true'
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        if: steps.want.outputs.run == 'true'
+        with:
+          key: ${{ matrix.app }}
+          workspaces: work/${{ matrix.app }} -> ../target/${{ matrix.app }}
+      - name: Install Trunk 0.21.14
+        if: steps.want.outputs.run == 'true'
+        run: command -v trunk >/dev/null && trunk --version | grep -q 0.21.14 || cargo install trunk --version 0.21.14 --locked
+      - name: Install and unit-test the scripts
+        if: steps.want.outputs.run == 'true'
+        run: npm ci && npm test
+      - name: Build
+        if: steps.want.outputs.run == 'true'
+        run: node scripts/build.mjs ${{ matrix.app }}
+      - name: Brand scan
+        if: steps.want.outputs.run == 'true'
+        run: node scripts/verify.mjs ${{ matrix.app }}
+      - name: Smoke (software renderer; the release gate is the Windows smoke, see README)
+        if: steps.want.outputs.run == 'true'
+        continue-on-error: true
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq xvfb >/dev/null
+          xvfb-run -a node scripts/smoke.mjs --app ${{ matrix.app }} --site out/${{ matrix.app }}/site --renderer webgl --checks boot,api
+      - uses: actions/upload-artifact@v4
+        if: steps.want.outputs.run == 'true'
+        with:
+          name: hanpan-${{ matrix.app }}-web
+          path: |
+            out/*.zip
+            out/*.zip.sha256
+      - name: Release
+        if: steps.want.outputs.run == 'true' && inputs.release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          zip=$(ls out/hanpan-${{ matrix.app }}-web-*.zip)
+          tag=$(node -e "import('./scripts/lib/pins.mjs').then(m=>console.log(m.releaseTag('${{ matrix.app }}', m.readPins('pins.json'))))")
+          gh release create "$tag" "$zip" "$zip.sha256" --title "$tag" --notes-file CHANGES-${{ matrix.app }}.md

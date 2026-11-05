@@ -1,0 +1,395 @@
+diff --git a/apps/photocraft-web/Cargo.toml b/apps/photocraft-web/Cargo.toml
+index 0176e0f..a498865 100644
+--- a/apps/photocraft-web/Cargo.toml
++++ b/apps/photocraft-web/Cargo.toml
+@@ -31,6 +31,7 @@ log = { workspace = true }
+ # `wgpu` pulls egui-wgpu's defaults: WebGPU plus the WebGL2 fallback.
+ eframe = { workspace = true, features = ["wgpu", "accesskit", "clipboard"] }
+ rfd = { workspace = true }
++serde_json = { workspace = true }
+ wasm-bindgen = "0.2"
+ wasm-bindgen-futures = "0.4"
+ js-sys = "0.3"
+diff --git a/apps/photocraft-web/src/api.rs b/apps/photocraft-web/src/api.rs
+new file mode 100644
+index 0000000..8140737
+--- /dev/null
++++ b/apps/photocraft-web/src/api.rs
+@@ -0,0 +1,212 @@
++//! `window.photocraft`: the control channel for the page, as promises.
++//!
++//! The same JSON methods as the desktop control server (`docs/control-protocol.md`), so an agent
++//! driving PhotoCraft in a browser tab (or in an `<iframe>` of a page on the same origin) uses the
++//! same commands as the CLI and the MCP server:
++//!
++//! ```js
++//! await photocraft.execute("file.new", {width: 800, height: 600})  // engine command → its result
++//! await photocraft.request("ui.inspect")                           // control method → its result
++//! await photocraft.commands()                                      // command list
++//! const {base64} = await photocraft.screenshot()                   // the window as PNG (base64)
++//! photocraft.openFile("photo.jpg", bytes)                          // opened as a dropped file is
++//! ```
++//!
++//! Results resolve with the method's `result`; errors reject with an `Error`.
++
++use std::cell::{Cell, RefCell};
++use std::sync::mpsc::{Receiver, Sender, TryRecvError};
++
++use photocraft_ui_egui::ControlRequest;
++use serde_json::{Value, json};
++use wasm_bindgen::prelude::*;
++
++use crate::saved_files::SavedFiles;
++use crate::web::Inbox;
++
++type Waiting = (Receiver<Value>, js_sys::Function, js_sys::Function);
++
++thread_local! {
++    static TX: RefCell<Option<Sender<ControlRequest>>> = const { RefCell::new(None) };
++    static WAITING: RefCell<Vec<Waiting>> = const { RefCell::new(Vec::new()) };
++    static CTX: RefCell<Option<egui::Context>> = const { RefCell::new(None) };
++    static INBOX: RefCell<Option<Inbox>> = const { RefCell::new(None) };
++    // Hanpan: requests made before the app runs wait here and go out when it connects
++    static PENDING: RefCell<Vec<(String, Value, js_sys::Function, js_sys::Function)>> = const { RefCell::new(Vec::new()) };
++    // Hanpan: saves the page asked to keep instead of downloading (ported from VectorCraft's web API)
++    static CAPTURE: Cell<bool> = const { Cell::new(false) };
++    static SAVED: RefCell<SavedFiles> = RefCell::new(SavedFiles::default());
++}
++
++/// Wire the page's requests to the app: control requests go to `tx`, opened files to `inbox`.
++pub fn connect(tx: Sender<ControlRequest>, inbox: Inbox, ctx: egui::Context) {
++    TX.with(|t| *t.borrow_mut() = Some(tx));
++    INBOX.with(|i| *i.borrow_mut() = Some(inbox));
++    CTX.with(|c| *c.borrow_mut() = Some(ctx));
++    for (method, params, resolve, reject) in PENDING.with(|p| std::mem::take(&mut *p.borrow_mut())) {
++        send(method, params, resolve, reject);
++    }
++    repaint();
++}
++
++/// Send one request to the app, or reject it when the app has gone.
++fn send(method: String, params: Value, resolve: js_sys::Function, reject: js_sys::Function) {
++    let (req, rx) = ControlRequest::new(method, params);
++    if TX.with(|t| t.borrow().as_ref().is_some_and(|tx| tx.send(req).is_ok())) {
++        WAITING.with(|w| w.borrow_mut().push((rx, resolve, reject)));
++    } else {
++        let _ = reject.call1(&JsValue::NULL, &js_sys::Error::new("PhotoCraft has stopped"));
++    }
++}
++
++/// Keep a save instead of downloading it, when the page asked for that. True when kept.
++pub fn capture(path: &str, bytes: &[u8]) -> bool {
++    if !CAPTURE.with(Cell::get) {
++        return false;
++    }
++    SAVED.with(|s| s.borrow_mut().keep(path, bytes));
++    true
++}
++
++fn repaint() {
++    CTX.with(|c| {
++        if let Some(ctx) = c.borrow().as_ref() {
++            ctx.request_repaint();
++        }
++    });
++}
++
++fn to_js(v: &Value) -> JsValue {
++    js_sys::JSON::parse(&v.to_string()).unwrap_or(JsValue::NULL)
++}
++
++/// The params a page passed: `{}` for none (`undefined` or `null`), else their JSON. Params that
++/// are not an object (a number, `NaN`, a string, a function), or whose JSON is not an object (a
++/// cyclic object, a throwing `toJSON`, an invalid `Date`), are an error, never `{}`: a command run
++/// without its params would act with its defaults, and `NaN` and an invalid `Date` stringify to
++/// `null`.
++fn from_js(v: &JsValue) -> Result<Value, String> {
++    if v.is_undefined() || v.is_null() {
++        return Ok(json!({}));
++    }
++    if !v.is_object() {
++        return Err("params must be an object".to_string());
++    }
++    let text = js_sys::JSON::stringify(v).ok().and_then(|s| s.as_string()).ok_or("params are not JSON (a cyclic object or a function?)")?;
++    match serde_json::from_str::<Value>(&text) {
++        Ok(v @ Value::Object(_)) => Ok(v),
++        Ok(v) => Err(format!("params must be a JSON object, not {v}")),
++        Err(e) => Err(format!("params are not JSON: {e}")),
++    }
++}
++
++/// Settle the promises of answered requests (called every frame).
++pub fn poll_replies() {
++    WAITING.with(|w| {
++        w.borrow_mut().retain(|(rx, resolve, reject)| match rx.try_recv() {
++            Ok(v) => {
++                if v.get("ok").and_then(Value::as_bool) == Some(true) {
++                    let _ = resolve.call1(&JsValue::NULL, &to_js(v.get("result").unwrap_or(&Value::Null)));
++                } else {
++                    let msg = v.get("error").and_then(Value::as_str).unwrap_or("error").to_string();
++                    let _ = reject.call1(&JsValue::NULL, &js_sys::Error::new(&msg));
++                }
++                false
++            }
++            Err(TryRecvError::Empty) => true,
++            Err(TryRecvError::Disconnected) => {
++                let _ = reject.call1(&JsValue::NULL, &js_sys::Error::new("request dropped"));
++                false
++            }
++        });
++    });
++}
++
++fn request(method: &str, params: Result<Value, String>) -> js_sys::Promise {
++    let params = match params {
++        Ok(params) => params,
++        Err(e) => return js_sys::Promise::reject(&js_sys::Error::new(&format!("{method}: {e}"))),
++    };
++    let method = method.to_string();
++    let p = js_sys::Promise::new(&mut |resolve, reject| {
++        if TX.with(|t| t.borrow().is_some()) {
++            send(method.clone(), params.clone(), resolve, reject);
++        } else {
++            PENDING.with(|p| p.borrow_mut().push((method.clone(), params.clone(), resolve, reject)));
++        }
++    });
++    repaint();
++    p
++}
++
++fn set_fn(obj: &js_sys::Object, name: &str, f: JsValue) -> Result<(), JsValue> {
++    js_sys::Reflect::set(obj, &name.into(), &f).map(|_| ())
++}
++
++/// Install `window.photocraft`.
++pub fn install() -> Result<(), JsValue> {
++    let obj = js_sys::Object::new();
++    set_fn(
++        &obj,
++        "request",
++        Closure::<dyn Fn(String, JsValue) -> js_sys::Promise>::new(|method: String, params: JsValue| request(&method, from_js(&params))).into_js_value(),
++    )?;
++    set_fn(
++        &obj,
++        "execute",
++        Closure::<dyn Fn(String, JsValue) -> js_sys::Promise>::new(|command: String, params: JsValue| {
++            request("engine.execute", from_js(&params).map(|params| json!({"command": command, "params": params})))
++        })
++        .into_js_value(),
++    )?;
++    set_fn(&obj, "commands", Closure::<dyn Fn() -> js_sys::Promise>::new(|| request("engine.commands", Ok(json!({})))).into_js_value())?;
++    set_fn(&obj, "inspect", Closure::<dyn Fn() -> js_sys::Promise>::new(|| request("ui.inspect", Ok(json!({})))).into_js_value())?;
++    set_fn(
++        &obj,
++        "screenshot",
++        Closure::<dyn Fn(JsValue) -> js_sys::Promise>::new(|params: JsValue| request("ui.screenshot", from_js(&params))).into_js_value(),
++    )?;
++    set_fn(
++        &obj,
++        "openFile",
++        Closure::<dyn Fn(String, js_sys::Uint8Array) -> JsValue>::new(|name: String, bytes: js_sys::Uint8Array| {
++            let queued = INBOX.with(|i| {
++                i.borrow().as_ref().is_some_and(|inbox| {
++                    inbox.lock().unwrap_or_else(|e| e.into_inner()).push((name, bytes.to_vec()));
++                    true
++                })
++            });
++            repaint();
++            JsValue::from_bool(queued)
++        })
++        .into_js_value(),
++    )?;
++    set_fn(&obj, "captureDownloads", Closure::<dyn Fn(bool)>::new(|on: bool| CAPTURE.with(|c| c.set(on))).into_js_value())?;
++    set_fn(
++        &obj,
++        "files",
++        Closure::<dyn Fn() -> JsValue>::new(|| {
++            SAVED.with(|s| to_js(&Value::Array(s.borrow().list().map(|(n, size)| json!({"path": n, "size": size})).collect())))
++        })
++        .into_js_value(),
++    )?;
++    set_fn(
++        &obj,
++        "readFile",
++        Closure::<dyn Fn(String) -> Result<JsValue, JsValue>>::new(|name: String| {
++            SAVED.with(|s| {
++                s.borrow()
++                    .get(&name)
++                    .map(|b| js_sys::Uint8Array::from(b).into())
++                    .ok_or_else(|| js_sys::Error::new(&format!("{name}: not found")).into())
++            })
++        })
++        .into_js_value(),
++    )?;
++    let w = web_sys::window().ok_or("no window")?;
++    // `false` when the page made `window.photocraft` read-only (or froze `window`) first.
++    if !js_sys::Reflect::set(&w, &"photocraft".into(), &obj)? {
++        return Err("window.photocraft is read-only".into());
++    }
++    Ok(())
++}
+diff --git a/apps/photocraft-web/src/main.rs b/apps/photocraft-web/src/main.rs
+index 0802a02..f6cf3de 100644
+--- a/apps/photocraft-web/src/main.rs
++++ b/apps/photocraft-web/src/main.rs
+@@ -22,6 +22,12 @@ mod preset_bridge;
+ #[cfg(target_arch = "wasm32")]
+ mod indexed_presets;
+ 
++#[cfg(target_arch = "wasm32")]
++mod api;
++
++#[cfg(any(target_arch = "wasm32", test))]
++mod saved_files;
++
+ #[cfg(target_arch = "wasm32")]
+ mod web;
+ 
+diff --git a/apps/photocraft-web/src/saved_files.rs b/apps/photocraft-web/src/saved_files.rs
+new file mode 100644
+index 0000000..7cd8863
+--- /dev/null
++++ b/apps/photocraft-web/src/saved_files.rs
+@@ -0,0 +1,70 @@
++//! What the page keeps of the app's saves (`api.rs`): `readFile` reads them back.
++
++/// Saved files kept (the oldest go first).
++pub const MAX_SAVED: usize = 16;
++
++/// The last component of a `/` or `\` path.
++fn file_name(path: &str) -> &str {
++    path.rsplit(['/', '\\']).next().filter(|n| !n.is_empty()).unwrap_or(path)
++}
++
++/// Files by name, newest last: saving a name again replaces it.
++#[derive(Default)]
++pub struct SavedFiles(Vec<(String, Vec<u8>)>);
++
++impl SavedFiles {
++    /// Keep `bytes` under the last component of `path`.
++    pub fn keep(&mut self, path: &str, bytes: &[u8]) {
++        let name = file_name(path).to_string();
++        self.0.retain(|(n, _)| *n != name);
++        self.0.push((name, bytes.to_vec()));
++        let extra = self.0.len().saturating_sub(MAX_SAVED);
++        self.0.drain(..extra);
++    }
++
++    /// A kept file by its name, or by a path ending in it.
++    pub fn get(&self, name: &str) -> Option<&[u8]> {
++        let wanted = file_name(name);
++        self.0.iter().find(|(n, _)| n == wanted).map(|(_, b)| b.as_slice())
++    }
++
++    /// `(name, size)` of each kept file, oldest first.
++    pub fn list(&self) -> impl Iterator<Item = (&str, usize)> {
++        self.0.iter().map(|(n, b)| (n.as_str(), b.len()))
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn keeps_by_name_replaces_and_reads_back_by_path() {
++        let mut s = SavedFiles::default();
++        s.keep("exports/poster.png", b"one");
++        s.keep(r"C:\out\poster.png", b"two");
++        s.keep("notes.txt", b"three");
++        assert_eq!(s.list().collect::<Vec<_>>(), vec![("poster.png", 3), ("notes.txt", 5)]);
++        assert_eq!(s.get("poster.png"), Some(&b"two"[..]));
++        assert_eq!(s.get("/exports/poster.png"), Some(&b"two"[..]));
++        assert_eq!(s.get("missing.png"), None);
++    }
++
++    #[test]
++    fn drops_the_oldest_past_the_cap() {
++        let mut s = SavedFiles::default();
++        for i in 0..MAX_SAVED + 3 {
++            s.keep(&format!("f{i}.png"), &[0]);
++        }
++        assert_eq!(s.list().count(), MAX_SAVED);
++        assert_eq!(s.get("f0.png"), None);
++        assert!(s.get(&format!("f{}.png", MAX_SAVED + 2)).is_some());
++    }
++
++    #[test]
++    fn a_trailing_separator_keeps_the_whole_name() {
++        let mut s = SavedFiles::default();
++        s.keep("odd/", b"x");
++        assert_eq!(s.get("odd/"), Some(&b"x"[..]));
++    }
++}
+diff --git a/apps/photocraft-web/src/web.rs b/apps/photocraft-web/src/web.rs
+index 024888c..c9a734e 100644
+--- a/apps/photocraft-web/src/web.rs
++++ b/apps/photocraft-web/src/web.rs
+@@ -14,7 +14,7 @@ use photocraft_ui_egui::theme::ThemeKind;
+ use photocraft_ui_egui::{FileDialogAnswer, FileDialogRequest, PhotocraftApp, Services};
+ use wasm_bindgen::JsCast as _;
+ 
+-type Inbox = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
++pub(crate) type Inbox = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+ 
+ /// Everything File › Open reads: PhotoCraft, Photoshop, OpenRaster, Krita and Affinity documents, flat images, and
+ /// Photoshop brushes (.abr), gradients (.grd), layer styles (.asl) and swatches (.aco, .act, .ase), which go to the preset libraries.
+@@ -46,6 +46,11 @@ type Served = Arc<Mutex<ServedFonts>>;
+ 
+ pub fn start() {
+     eframe::WebLogger::init(log::LevelFilter::Info).ok();
++    // `window.photocraft` (crate::api) is there from the start: until the app runs, its requests
++    // reject with "not running yet" and `openFile` returns false.
++    if let Err(e) = crate::api::install() {
++        log::error!("photocraft-web: couldn't install window.photocraft: {e:?}");
++    }
+     wasm_bindgen_futures::spawn_local(async {
+         let Some(document) = web_sys::window().and_then(|w| w.document()) else {
+             log::error!("no document");
+@@ -90,6 +95,10 @@ pub fn start() {
+                     preset_warnings.extend(warnings);
+                     let drag = listen_drag(&pen_target);
+                     let mut app = PhotocraftApp::new(session, services(inbox.clone(), place_inbox.clone(), drag_pos_service(pen_target.clone(), drag)));
++                    // `window.photocraft`: the page's control channel (crate::api).
++                    let (control_tx, control_rx) = std::sync::mpsc::channel();
++                    crate::api::connect(control_tx, inbox.clone(), cc.egui_ctx.clone());
++                    app = app.with_control(control_rx);
+                     if !preset_warnings.is_empty() {
+                         photocraft_ui_egui::notices::post(&mut app, i18n::t("Some brush presets could not be loaded"), preset_warnings, true, None);
+                     }
+@@ -375,6 +384,7 @@ impl eframe::App for WebShell {
+         self.app.logic_frame(ctx, frame);
+         self.save_presets(ctx);
+         self.app.finish_type_reset_logic(ctx);
++        crate::api::poll_replies();
+     }
+ 
+     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+@@ -404,6 +414,7 @@ impl eframe::App for WebShell {
+         self.app.ui_frame(ui, frame);
+         self.save_presets(ui.ctx());
+         self.app.finish_type_reset_pass(ui.ctx());
++        crate::api::poll_replies();
+     }
+ }
+ 
+@@ -455,6 +466,9 @@ fn services(inbox: Inbox, place_inbox: Inbox, cursor_pos: photocraft_ui_egui::Cu
+         write: Some(Box::new(|path: &str, bytes: &[u8]| download(path, bytes))),
+         // A download may be cancelled and never reports back: it doesn't save the document.
+         write_unconfirmed: true,
++        // Hanpan: the page API's `app.save` writes the way File › Save does here (a download,
++        // or the page's capture), so a page can save without a desktop file system
++        automation_write: Some(Box::new(|path: &str, bytes: &[u8]| download(path, bytes))),
+         encode_png: Some(Box::new(|w, h, rgba| {
+             let img = Image::from_u8(w, h, ChannelLayout::Rgba, rgba.to_vec()).map_err(|e| e.to_string())?;
+             photocraft_codecs::encode(&img, photocraft_codecs::Format::Png, &EncodeOptions::default()).map_err(|e| e.to_string())
+@@ -477,6 +491,9 @@ fn local_storage() -> Option<web_sys::Storage> {
+ 
+ /// Trigger a browser download of `bytes` named after the last component of `path`.
+ fn download(path: &str, bytes: &[u8]) -> Result<(), String> {
++    if crate::api::capture(path, bytes) {
++        return Ok(());
++    }
+     let js = |e: wasm_bindgen::JsValue| format!("{e:?}");
+     let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "photocraft".into());
+     let window = web_sys::window().ok_or("no window")?;

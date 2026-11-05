@@ -4,8 +4,17 @@
   "description": "Hanpan's patched web builds of PhotoCraft and VectorCraft (by the ArtCraft team)",
   "license": "MIT OR Apache-2.0",
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
-    "test": "node --test \"test/*.test.mjs\""
+    "test": "node --test \"test/*.test.mjs\"",
+    "build": "node scripts/build.mjs",
+    "verify": "node scripts/verify.mjs",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "devDependencies": {
+    "electron": "43.7.6",
+    "yazl": "3.3.1"
   }
 }

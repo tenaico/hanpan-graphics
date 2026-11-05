@@ -9,17 +9,20 @@ on:
         options: [both, photo, illust]
         default: both
       release:
-        description: Publish the zips as GitHub releases
+        description: Make draft GitHub releases of the zips (publish them after the Windows smoke, see README)
         type: boolean
         default: false
 
-permissions:
-  contents: write
+# nothing by default; each job asks for what it needs
+permissions: {}
 
 jobs:
   build:
     name: build ${{ matrix.app }}
     runs-on: ubuntu-latest
+    # the build runs upstream build scripts and our patches: it gets a read-only token
+    permissions:
+      contents: read
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -31,6 +34,8 @@ jobs:
         run: echo "run=${{ inputs.app == 'both' || inputs.app == matrix.app }}" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
         if: steps.want.outputs.run == 'true'
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         if: steps.want.outputs.run == 'true'
         with:
@@ -43,7 +48,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         if: steps.want.outputs.run == 'true'
         with:
-          key: ${{ matrix.app }}
+          key: ${{ matrix.app }}-${{ hashFiles('pins.json', 'patches/**') }}
           workspaces: work/${{ matrix.app }} -> ../target/${{ matrix.app }}
       - name: Install Trunk 0.21.14
         if: steps.want.outputs.run == 'true'
@@ -70,11 +75,33 @@ jobs:
           path: |
             out/*.zip
             out/*.zip.sha256
-      - name: Release
-        if: steps.want.outputs.run == 'true' && inputs.release
+
+  release:
+    name: draft releases
+    needs: build
+    if: ${{ inputs.release }}
+    runs-on: ubuntu-latest
+    # the only job with a write token; it runs no build code, only gh on the built zips
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hanpan-*-web
+          path: out
+          merge-multiple: true
+      - name: Draft a release per built app
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          zip=$(ls out/hanpan-${{ matrix.app }}-web-*.zip)
-          tag=$(node -e "import('./scripts/lib/pins.mjs').then(m=>console.log(m.releaseTag('${{ matrix.app }}', m.readPins('pins.json'))))")
-          gh release create "$tag" "$zip" "$zip.sha256" --title "$tag" --notes-file CHANGES-${{ matrix.app }}.md
+          for app in photo illust; do
+            zip=$(ls out/hanpan-$app-web-*.zip 2>/dev/null || true)
+            [ -n "$zip" ] || continue
+            (cd out && sha256sum -c "$(basename "$zip").sha256")
+            tag=$(node -e "import('./scripts/lib/pins.mjs').then(m=>console.log(m.releaseTag('$app', m.readPins('pins.json'))))")
+            gh release create "$tag" "$zip" "$zip.sha256" --target "$GITHUB_SHA" --draft --title "$tag" --notes-file CHANGES-$app.md
+          done

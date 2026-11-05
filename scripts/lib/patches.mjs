@@ -38,3 +38,6 @@ export function applyPatches(dir, patches) {
     }
   }
 }
+
+/** the file name of a patch path, with either separator */
+export const patchName = (path) => path.split(/[\\/]/).pop()

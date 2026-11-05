@@ -46,7 +46,13 @@ app.whenReady().then(async () => {
     width: 1280,
     height: 800,
     show: false,
-    webPreferences: { backgroundThrottling: false, paintWhenInitiallyHidden: true },
+    webPreferences: {
+      backgroundThrottling: false,
+      paintWhenInitiallyHidden: true,
+      // --gpu none: the page sees a browser without WebGPU or WebGL (smoke-no-gpu.cjs runs in its
+      // world before the page's scripts), so the app fails to start
+      ...(opts.gpu === 'none' ? { preload: join(__dirname, 'smoke-no-gpu.cjs'), contextIsolation: false, sandbox: false } : {}),
+    },
   })
   const consoleLines = []
   win.webContents.on('console-message', (e) => consoleLines.push(e.message))

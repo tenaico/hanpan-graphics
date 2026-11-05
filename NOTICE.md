@@ -12,5 +12,8 @@ This repository holds only our patches and build scripts, under the same terms (
 The builds are modified versions. They are not made, sponsored or endorsed by the ArtCraft team,
 and the ArtCraft name and marks are removed from them as the upstream brand terms
 (`docs/brand/LICENSE-brand.txt` in each upstream repository) require for modified versions.
-Each build ships the upstream `LICENSE-*`, `NOTICE`, `ATTRIBUTION.md`, the licences of the fonts it
-carries and `HANPAN-CHANGES.md`, the list of what we changed.
+Each build ships the upstream `LICENSE-*`, `NOTICE` and `ATTRIBUTION.md` (PhotoCraft) or `ASSETS.md`
+(VectorCraft); every licence text those files name, at the path they name it by (for example
+`assets/fonts/OFL-Inter.txt`, `crates/algo/data/LICENSE-libfacedetection.txt`,
+`docs/brand/LICENSE-brand.txt`), so each reference resolves inside the build; the licences of the
+craft-fonts fonts under `licenses/craft-fonts/`; and `HANPAN-CHANGES.md`, the list of what we changed.

@@ -7,7 +7,7 @@ import { delimiter, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { readPins, artifactName } from './lib/pins.mjs'
 import { checkoutPinned } from './lib/upstream.mjs'
-import { patchList, applyPatches } from './lib/patches.mjs'
+import { patchList, applyPatches, patchName } from './lib/patches.mjs'
 import { stageSite } from './lib/stage.mjs'
 import { zipDir } from './lib/zip.mjs'
 import { sha256File, sha256Line } from './lib/hash.mjs'
@@ -29,7 +29,7 @@ checkoutPinned(pins[app], upstream)
 checkoutPinned({ repo: pins.craftFonts.repo, commit: pins.craftFonts.commit }, join(work, 'craft-fonts'))
 const patches = patchList(app)
 applyPatches(upstream, patches)
-console.log(`[${app}] patches: ${patches.length ? patches.map((p) => p.split(/[\/]/).pop()).join(', ') : 'none'}`)
+console.log(`[${app}] patches: ${patches.length ? patches.map(patchName).join(', ') : 'none'}`)
 
 const env = { ...process.env, CARGO_TARGET_DIR: join(work, 'target', app) }
 env.PATH = [join(homedir(), '.cargo', 'bin'), env.PATH ?? env.Path].join(delimiter)

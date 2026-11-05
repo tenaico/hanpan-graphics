@@ -12,10 +12,10 @@ index 0176e0f..a498865 100644
  js-sys = "0.3"
 diff --git a/apps/photocraft-web/src/api.rs b/apps/photocraft-web/src/api.rs
 new file mode 100644
-index 0000000..8140737
+index 0000000..79dcdf5
 --- /dev/null
 +++ b/apps/photocraft-web/src/api.rs
-@@ -0,0 +1,212 @@
+@@ -0,0 +1,236 @@
 +//! `window.photocraft`: the control channel for the page, as promises.
 +//!
 +//! The same JSON methods as the desktop control server (`docs/control-protocol.md`), so an agent
@@ -30,7 +30,9 @@ index 0000000..8140737
 +//! photocraft.openFile("photo.jpg", bytes)                          // opened as a dropped file is
 +//! ```
 +//!
-+//! Results resolve with the method's `result`; errors reject with an `Error`.
++//! Results resolve with the method's `result`; errors reject with an `Error`. Requests made before
++//! the app runs wait for it; if it cannot start, they and every later request reject with the
++//! reason, and `openFile` returns false.
 +
 +use std::cell::{Cell, RefCell};
 +use std::sync::mpsc::{Receiver, Sender, TryRecvError};
@@ -51,6 +53,8 @@ index 0000000..8140737
 +    static INBOX: RefCell<Option<Inbox>> = const { RefCell::new(None) };
 +    // Hanpan: requests made before the app runs wait here and go out when it connects
 +    static PENDING: RefCell<Vec<(String, Value, js_sys::Function, js_sys::Function)>> = const { RefCell::new(Vec::new()) };
++    // Hanpan: why the app could not start, once it is known; requests then reject at once
++    static FAILED: RefCell<Option<String>> = const { RefCell::new(None) };
 +    // Hanpan: saves the page asked to keep instead of downloading (ported from VectorCraft's web API)
 +    static CAPTURE: Cell<bool> = const { Cell::new(false) };
 +    static SAVED: RefCell<SavedFiles> = RefCell::new(SavedFiles::default());
@@ -65,6 +69,21 @@ index 0000000..8140737
 +        send(method, params, resolve, reject);
 +    }
 +    repaint();
++}
++
++/// The app could not start: reject the requests waiting for it with `msg`, and every later one at
++/// once, instead of leaving them pending forever; `openFile` returns false from now on.
++pub fn fail(msg: &str) {
++    FAILED.with(|f| *f.borrow_mut() = Some(msg.to_string()));
++    TX.with(|t| *t.borrow_mut() = None);
++    INBOX.with(|i| *i.borrow_mut() = None);
++    for (method, _, _, reject) in PENDING.with(|p| std::mem::take(&mut *p.borrow_mut())) {
++        reject_now(&reject, &method, msg);
++    }
++}
++
++fn reject_now(reject: &js_sys::Function, method: &str, msg: &str) {
++    let _ = reject.call1(&JsValue::NULL, &js_sys::Error::new(&format!("{method}: {msg}")));
 +}
 +
 +/// Send one request to the app, or reject it when the app has gone.
@@ -147,7 +166,9 @@ index 0000000..8140737
 +    };
 +    let method = method.to_string();
 +    let p = js_sys::Promise::new(&mut |resolve, reject| {
-+        if TX.with(|t| t.borrow().is_some()) {
++        if let Some(msg) = FAILED.with(|f| f.borrow().clone()) {
++            reject_now(&reject, &method, &msg);
++        } else if TX.with(|t| t.borrow().is_some()) {
 +            send(method.clone(), params.clone(), resolve, reject);
 +        } else {
 +            PENDING.with(|p| p.borrow_mut().push((method.clone(), params.clone(), resolve, reject)));
@@ -188,6 +209,9 @@ index 0000000..8140737
 +        &obj,
 +        "openFile",
 +        Closure::<dyn Fn(String, js_sys::Uint8Array) -> JsValue>::new(|name: String, bytes: js_sys::Uint8Array| {
++            if FAILED.with(|f| f.borrow().is_some()) {
++                return JsValue::FALSE;
++            }
 +            let queued = INBOX.with(|i| {
 +                i.borrow().as_ref().is_some_and(|inbox| {
 +                    inbox.lock().unwrap_or_else(|e| e.into_inner()).push((name, bytes.to_vec()));
@@ -322,7 +346,7 @@ index 0000000..7cd8863
 +    }
 +}
 diff --git a/apps/photocraft-web/src/web.rs b/apps/photocraft-web/src/web.rs
-index 024888c..c9a734e 100644
+index 024888c..ea83676 100644
 --- a/apps/photocraft-web/src/web.rs
 +++ b/apps/photocraft-web/src/web.rs
 @@ -14,7 +14,7 @@ use photocraft_ui_egui::theme::ThemeKind;
@@ -334,19 +358,29 @@ index 024888c..c9a734e 100644
  
  /// Everything File › Open reads: PhotoCraft, Photoshop, OpenRaster, Krita and Affinity documents, flat images, and
  /// Photoshop brushes (.abr), gradients (.grd), layer styles (.asl) and swatches (.aco, .act, .ase), which go to the preset libraries.
-@@ -46,6 +46,11 @@ type Served = Arc<Mutex<ServedFonts>>;
+@@ -46,13 +46,21 @@ type Served = Arc<Mutex<ServedFonts>>;
  
  pub fn start() {
      eframe::WebLogger::init(log::LevelFilter::Info).ok();
 +    // `window.photocraft` (crate::api) is there from the start: until the app runs, its requests
-+    // reject with "not running yet" and `openFile` returns false.
++    // wait for it and `openFile` returns false; every way out of this function without a running
++    // app calls `crate::api::fail`, so those requests reject with the reason instead of hanging.
 +    if let Err(e) = crate::api::install() {
 +        log::error!("photocraft-web: couldn't install window.photocraft: {e:?}");
 +    }
      wasm_bindgen_futures::spawn_local(async {
          let Some(document) = web_sys::window().and_then(|w| w.document()) else {
              log::error!("no document");
-@@ -90,6 +95,10 @@ pub fn start() {
++            crate::api::fail("PhotoCraft failed to start: no document");
+             return;
+         };
+         let Some(canvas) = document.get_element_by_id(CANVAS_ID).and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok()) else {
+             log::error!("missing <canvas id=\"{CANVAS_ID}\">");
++            crate::api::fail(&format!("PhotoCraft failed to start: no <canvas id=\"{CANVAS_ID}\">"));
+             return;
+         };
+         let q = query();
+@@ -90,6 +98,10 @@ pub fn start() {
                      preset_warnings.extend(warnings);
                      let drag = listen_drag(&pen_target);
                      let mut app = PhotocraftApp::new(session, services(inbox.clone(), place_inbox.clone(), drag_pos_service(pen_target.clone(), drag)));
@@ -357,7 +391,17 @@ index 024888c..c9a734e 100644
                      if !preset_warnings.is_empty() {
                          photocraft_ui_egui::notices::post(&mut app, i18n::t("Some brush presets could not be loaded"), preset_warnings, true, None);
                      }
-@@ -375,6 +384,7 @@ impl eframe::App for WebShell {
+@@ -107,6 +119,9 @@ pub fn start() {
+                 }),
+             )
+             .await;
++        if let Err(e) = &result {
++            crate::api::fail(&format!("PhotoCraft failed to start: {e:?}"));
++        }
+         if let Some(el) = document.get_element_by_id("photocraft_loading") {
+             match result {
+                 Ok(()) => el.remove(),
+@@ -375,6 +390,7 @@ impl eframe::App for WebShell {
          self.app.logic_frame(ctx, frame);
          self.save_presets(ctx);
          self.app.finish_type_reset_logic(ctx);
@@ -365,7 +409,7 @@ index 024888c..c9a734e 100644
      }
  
      fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-@@ -404,6 +414,7 @@ impl eframe::App for WebShell {
+@@ -404,6 +420,7 @@ impl eframe::App for WebShell {
          self.app.ui_frame(ui, frame);
          self.save_presets(ui.ctx());
          self.app.finish_type_reset_pass(ui.ctx());
@@ -373,7 +417,7 @@ index 024888c..c9a734e 100644
      }
  }
  
-@@ -455,6 +466,9 @@ fn services(inbox: Inbox, place_inbox: Inbox, cursor_pos: photocraft_ui_egui::Cu
+@@ -455,6 +472,9 @@ fn services(inbox: Inbox, place_inbox: Inbox, cursor_pos: photocraft_ui_egui::Cu
          write: Some(Box::new(|path: &str, bytes: &[u8]| download(path, bytes))),
          // A download may be cancelled and never reports back: it doesn't save the document.
          write_unconfirmed: true,
@@ -383,7 +427,7 @@ index 024888c..c9a734e 100644
          encode_png: Some(Box::new(|w, h, rgba| {
              let img = Image::from_u8(w, h, ChannelLayout::Rgba, rgba.to_vec()).map_err(|e| e.to_string())?;
              photocraft_codecs::encode(&img, photocraft_codecs::Format::Png, &EncodeOptions::default()).map_err(|e| e.to_string())
-@@ -477,6 +491,9 @@ fn local_storage() -> Option<web_sys::Storage> {
+@@ -477,6 +497,9 @@ fn local_storage() -> Option<web_sys::Storage> {
  
  /// Trigger a browser download of `bytes` named after the last component of `path`.
  fn download(path: &str, bytes: &[u8]) -> Result<(), String> {

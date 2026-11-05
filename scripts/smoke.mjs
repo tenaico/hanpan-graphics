@@ -1,4 +1,5 @@
 // node scripts/smoke.mjs --app <photo|illust> --site <dir> --checks a,b [--query "<q>"] [--renderer auto|webgl|cpu]
+//   [--gpu none]  (no WebGPU or WebGL in the page, so the app cannot start: --gpu none --checks api-no-start)
 // Runs the named checks against the site in a hidden Electron window; exit 1 when one fails.
 import { spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
@@ -14,7 +15,7 @@ for (let i = 0; i < argv.length; i++) {
   if (argv[i].startsWith('--')) args[argv[i].slice(2)] = argv[i + 1] ?? ''
 }
 if (!['photo', 'illust'].includes(args.app) || !args.site || !args.checks) {
-  console.error('usage: node scripts/smoke.mjs --app <photo|illust> --site <dir> --checks a,b [--query q] [--renderer r]')
+  console.error('usage: node scripts/smoke.mjs --app <photo|illust> --site <dir> --checks a,b [--query q] [--renderer r] [--gpu none]')
   process.exit(2)
 }
 
@@ -27,6 +28,7 @@ const opts = {
   site: resolve(args.site),
   out: resolve(ROOT, 'out', args.app),
   checks: args.checks.split(',').filter(Boolean),
+  gpu: args.gpu ?? 'auto',
   // flags without a value (?cpu) keep their bare form
   query: params.toString().replace(/=(&|$)/g, '$1'),
 }

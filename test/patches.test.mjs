@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { patchList, applyPatches } from '../scripts/lib/patches.mjs'
+import { patchList, applyPatches, patchName } from '../scripts/lib/patches.mjs'
 
 const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' })
 
@@ -69,4 +69,9 @@ test('refuses a checkout with local changes', () => {
   writeFileSync(join(f.repo, 'a.txt'), 'local edit\n')
   assert.throws(() => applyPatches(f.repo, patchList('photo', f.root)), /clean checkout/)
   assert.equal(readFileSync(join(f.repo, 'a.txt'), 'utf8'), 'local edit\n')
+})
+
+test('patchName takes the file name with either separator', () => {
+  assert.equal(patchName('C:\\x\\patches\\photo\\0001-web-control-api.patch'), '0001-web-control-api.patch')
+  assert.equal(patchName('/x/patches/photo/0002-brand-cleanup.patch'), '0002-brand-cleanup.patch')
 })

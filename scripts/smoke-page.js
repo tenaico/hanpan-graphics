@@ -45,6 +45,29 @@
         return fail(`first call threw: ${e && e.message}`)
       }
     },
+    // PhotoCraft when the app cannot start (run with --gpu none, a page without WebGPU or WebGL):
+    // a call made at once and a call made after the failure both reject with the reason, they do
+    // not wait forever, and openFile returns false
+    async 'api-no-start'({ global }) {
+      const api = await waitFor(() => window[global], 60000)
+      if (!api) return fail(`no window.${global} after 60s`)
+      const settle = (p) =>
+        Promise.race([
+          p.then(() => 'resolved', (e) => `rejected: ${e && e.message}`),
+          sleep(30000).then(() => 'still pending after 30s'),
+        ])
+      const early = await settle(api.commands())
+      const failed = await waitFor(() => /failed to start/i.test(document.body.innerText), 10000)
+      if (!failed) return fail(`the app started (or showed no failure); early call: ${early}`)
+      const late = await Promise.race([
+        api.inspect().then(() => 'resolved', (e) => `rejected: ${e && e.message}`),
+        sleep(2000).then(() => 'still pending after 2s'),
+      ])
+      const opened = api.openFile('x.png', new Uint8Array([1, 2, 3]))
+      const good = (r) => /^rejected: .*failed to start/i.test(r)
+      const detail = `early: ${early}; late: ${late}; openFile: ${opened}`
+      return good(early) && good(late) && opened === false ? ok(detail) : fail(detail)
+    },
     // a save the page captured can be read back: new document, PNG export, readFile
     async capture({ global }) {
       const api = await waitFor(() => window[global], 60000)

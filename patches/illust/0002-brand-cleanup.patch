@@ -1,0 +1,1609 @@
+diff --git a/crates/engine/src/cmd/help.rs b/crates/engine/src/cmd/help.rs
+index e88f00d..3aa35bd 100644
+--- a/crates/engine/src/cmd/help.rs
++++ b/crates/engine/src/cmd/help.rs
+@@ -1,19 +1,11 @@
+-//! Help → community and project links (the ArtCraft Discord, website, this app's page and its
+-//! GitHub repository). The commands return the URL; the frontend opens it.
++//! Help → project links (this app's GitHub repository). The commands return the URL; the frontend opens it.
+ 
+ use serde_json::{Value, json};
+ 
+ use super::{CommandSpec, Result, always, cmd};
+ 
+-/// The app's id on getartcraft.com and GitHub.
++/// The app's id on GitHub.
+ pub const APP_ID: &str = "vectorcraft";
+-pub const DISCORD_URL: &str = "https://discord.gg/artcraft";
+-pub const WEBSITE_URL: &str = "https://getartcraft.com";
+-
+-/// This app's page on the website.
+-pub fn app_page_url() -> String {
+-    format!("{WEBSITE_URL}/apps/{APP_ID}")
+-}
+ 
+ /// This app's source repository.
+ pub fn github_url() -> String {
+@@ -22,13 +14,8 @@ pub fn github_url() -> String {
+ 
+ pub fn specs() -> Vec<CommandSpec> {
+     vec![
+-        cmd!(query "help.discord", "Join Our Discord", ["Help"], None, "{} → {url} the ArtCraft community Discord", always, |_, _| url(DISCORD_URL.into())),
+-        cmd!(query "help.website", "ArtCraft Website", ["Help"], None, "{} → {url}", always, |_, _| url(WEBSITE_URL.into())),
+-        cmd!(query "help.appPage", "VectorCraft on getartcraft.com", ["Help"], None, "{} → {url} this app's page", always, |_, _| url(app_page_url())),
+         cmd!(query "help.github", "VectorCraft on GitHub", ["Help"], None, "{} → {url} source code, issues and releases", always, |_, _| url(github_url())),
+-        cmd!(query "help.links", "Links", [], None, "{} → {discord, website, appPage, github}", always, |_, _| {
+-            Ok(json!({ "discord": DISCORD_URL, "website": WEBSITE_URL, "appPage": app_page_url(), "github": github_url() }))
+-        }),
++        cmd!(query "help.links", "Links", [], None, "{} → {github}", always, |_, _| Ok(json!({ "github": github_url() }))),
+     ]
+ }
+ 
+@@ -44,9 +31,7 @@ mod tests {
+     #[test]
+     fn links() {
+         let mut s = Session::new();
+-        assert_eq!(s.execute("help.discord", &json!({})).unwrap()["url"], "https://discord.gg/artcraft");
+-        assert_eq!(s.execute("help.appPage", &json!({})).unwrap()["url"], "https://getartcraft.com/apps/vectorcraft");
+         assert_eq!(s.execute("help.github", &json!({})).unwrap()["url"], "https://github.com/storytold/vectorcraft");
+-        assert_eq!(s.execute("help.links", &json!({})).unwrap()["website"], "https://getartcraft.com");
++        assert_eq!(s.execute("help.links", &json!({})).unwrap()["github"], "https://github.com/storytold/vectorcraft");
+     }
+ }
+diff --git a/crates/ui-egui/src/chrome.rs b/crates/ui-egui/src/chrome.rs
+index c619748..db68f6d 100644
+--- a/crates/ui-egui/src/chrome.rs
++++ b/crates/ui-egui/src/chrome.rs
+@@ -39,7 +39,7 @@ const MARK: f32 = 18.0;
+ /// Height of the workspace switcher.
+ const WIDGET_H: f32 = 22.0;
+ 
+-/// The application bar: brand mark, Home, menus, then Discord, search and the workspace switcher
++/// The application bar: brand mark, Home, menus, then search and the workspace switcher
+ /// at the right. With [`VectorcraftApp::custom_titlebar`] it is also the window's title bar
+ /// ([`titlebar`]): the caption buttons take the right end and the rest of the bar drags the window.
+ /// On macOS, under the system's transparent title bar, its empty space drags and zooms the window
+@@ -72,7 +72,7 @@ pub fn app_bar(app: &mut VectorcraftApp, ui: &mut Ui) {
+             // With the macOS menu bar the menus are at the top of the screen instead.
+             let menus_end = if app.services.native_menu.is_some() { ui.cursor().min.x } else { menus::menu_bar(app, ui) };
+             // The right-side group fills the space after the menus from the right; when it runs
+-            // short, Discord goes first (it is also under Help), then the search icon (the palette
++            // short, the search icon goes first (the palette
+             // stays under its shortcut), then the workspace switcher narrows.
+             let full = ui.max_rect();
+             let right_edge = if custom { full.right() - titlebar::WIDTH - 10.0 } else { full.right() };
+@@ -88,7 +88,6 @@ pub fn app_bar(app: &mut VectorcraftApp, ui: &mut Ui) {
+             let icon = 28.0;
+             let search = room >= 64.0 + 8.0 + gap + icon;
+             let ws_w = ws_w.min(room - 8.0 - gap - if search { icon } else { 0.0 }).max(64.0);
+-            let discord = search && room >= ws_w + 8.0 + gap + icon + 10.0 + gap + crate::community::discord_width(ui, false);
+             let mut rui = ui.new_child(egui::UiBuilder::new().max_rect(right).layout(egui::Layout::right_to_left(egui::Align::Center)));
+             let ui = &mut rui;
+             // Workspace switcher: shows the current workspace, opens Window → Workspace.
+@@ -110,10 +109,6 @@ pub fn app_bar(app: &mut VectorcraftApp, ui: &mut Ui) {
+                     app.ui.palette_query.clear();
+                 }
+             }
+-            if discord {
+-                ui.add_space(10.0);
+-                crate::community::discord_button(app, ui, false);
+-            }
+             if app.services.native_menu.is_some() {
+                 let title = ui.painter().layout_no_wrap("VectorCraft".into(), egui::FontId::proportional(13.5), t.text);
+                 let title_rect = egui::Rect::from_center_size(full.center(), title.size());
+diff --git a/crates/ui-egui/src/community.rs b/crates/ui-egui/src/community.rs
+index 7ed5eb9..a78144a 100644
+--- a/crates/ui-egui/src/community.rs
++++ b/crates/ui-egui/src/community.rs
+@@ -1,55 +1,10 @@
+-//! Community and project links: the Discord button (header, About, Home) and the link list.
+-//! Icons are Lucide's (ISC); Discord's own logo is a trademark, so the button uses a chat icon
+-//! on Discord's colour with the word "Discord".
++//! Project links: the GitHub link (About, Home). Icons are Lucide's (ISC).
+ 
+-use egui::{Color32, CornerRadius, Sense, Ui, vec2};
++use egui::Ui;
+ 
+-use crate::theme::{self, Tokens};
++use crate::theme::Tokens;
+ use crate::{VectorcraftApp, icons};
+ 
+-/// Discord's brand colour (a colour, not a logo).
+-const DISCORD: Color32 = Color32::from_rgb(0x58, 0x65, 0xF2);
+-
+-/// The Discord button's label, height and width.
+-fn discord_layout(ui: &Ui, large: bool) -> (std::sync::Arc<egui::Galley>, f32, f32) {
+-    let (h, font, label) =
+-        if large { (36.0, theme::semibold(14.0), tl!("Join our Discord")) } else { (24.0, egui::FontId::proportional(12.0), "Discord") };
+-    let galley = ui.painter().layout_no_wrap(label.to_string(), font, Color32::PLACEHOLDER);
+-    let w = galley.size().x + h * 0.55 + h * 0.9;
+-    (galley, h, w)
+-}
+-
+-/// The Discord button's width (the app bar drops it when space runs out).
+-pub fn discord_width(ui: &Ui, large: bool) -> f32 {
+-    discord_layout(ui, large).2
+-}
+-
+-/// The Discord button: compact and quiet for the app bar, large for About / Home.
+-pub fn discord_button(app: &mut VectorcraftApp, ui: &mut Ui, large: bool) -> egui::Response {
+-    let (galley, h, w) = discord_layout(ui, large);
+-    let icon = h * 0.55;
+-    let (r, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
+-    let at = egui::pos2(0.0, r.center().y - galley.size().y / 2.0);
+-    let ir = egui::Rect::from_center_size(r.left_center() + vec2(h * 0.35 + icon / 2.0, 0.0), vec2(icon, icon));
+-    if large {
+-        let fill = if resp.hovered() { DISCORD.gamma_multiply(0.85) } else { DISCORD };
+-        ui.painter().rect_filled(r, CornerRadius::same((h / 2.0) as u8), fill);
+-        icons::paint(ui, "message-circle", ir, Color32::WHITE);
+-        ui.painter().galley(egui::pos2(ir.right() + h * 0.2, at.y), galley, Color32::WHITE);
+-    } else {
+-        // In the app bar it stays quiet: a soft button with Discord's colour on its icon alone.
+-        let t = Tokens::get(ui.ctx());
+-        ui.painter().rect_filled(r, CornerRadius::same(6), if resp.hovered() { t.hover } else { t.button });
+-        icons::paint(ui, "message-circle", ir, DISCORD);
+-        ui.painter().galley(egui::pos2(ir.right() + h * 0.2, at.y), galley, if resp.hovered() { t.text_strong } else { t.text });
+-    }
+-    let resp = resp.on_hover_text(tl!("Join the ArtCraft community on Discord (discord.gg/artcraft)"));
+-    if resp.clicked() {
+-        app.open_link("help.discord");
+-    }
+-    resp
+-}
+-
+ /// One link row: icon, label, opens the command's URL.
+ fn link(app: &mut VectorcraftApp, ui: &mut Ui, icon: &str, label: &str, cmd: &str, url: &str) {
+     let t = Tokens::get(ui.ctx());
+@@ -62,14 +17,10 @@ fn link(app: &mut VectorcraftApp, ui: &mut Ui, icon: &str, label: &str, cmd: &st
+     });
+ }
+ 
+-/// The Discord button and the website / app page / GitHub links.
++/// The GitHub link.
+ pub fn links(app: &mut VectorcraftApp, ui: &mut Ui) {
+-    discord_button(app, ui, true);
+-    ui.add_space(8.0);
+     let l = app.session.execute("help.links", &serde_json::json!({})).unwrap_or_default();
+     let s = |k: &str| l[k].as_str().unwrap_or("").to_string();
+-    link(app, ui, "globe", tl!("ArtCraft website"), "help.website", &s("website"));
+-    link(app, ui, "external-link", tl!("VectorCraft on getartcraft.com"), "help.appPage", &s("appPage"));
+     link(app, ui, "git-branch", tl!("Source code on GitHub"), "help.github", &s("github"));
+ }
+ 
+@@ -84,24 +35,14 @@ mod tests {
+         let o = opened.clone();
+         let services = crate::Services { open_url: Some(Box::new(move |u: &str| o.lock().unwrap().push(u.to_string()))), ..Default::default() };
+         let mut app = VectorcraftApp::new(vectorcraft_engine::Session::new(), services);
+-        for id in ["help.discord", "help.website", "help.appPage", "help.github"] {
+-            crate::menus::invoke(&mut app, id, serde_json::json!({}));
+-        }
+-        assert_eq!(
+-            *opened.lock().unwrap(),
+-            [
+-                "https://discord.gg/artcraft",
+-                "https://getartcraft.com",
+-                "https://getartcraft.com/apps/vectorcraft",
+-                "https://github.com/storytold/vectorcraft"
+-            ]
+-        );
++        crate::menus::invoke(&mut app, "help.github", serde_json::json!({}));
++        assert_eq!(*opened.lock().unwrap(), ["https://github.com/storytold/vectorcraft"]);
+         // The control channel / MCP path returns the URL without opening a browser.
+-        let v = app.run("help.discord", serde_json::json!({})).unwrap();
+-        assert_eq!(v["url"], "https://discord.gg/artcraft");
+-        assert_eq!(opened.lock().unwrap().len(), 4);
++        let v = app.run("help.github", serde_json::json!({})).unwrap();
++        assert_eq!(v["url"], "https://github.com/storytold/vectorcraft");
++        assert_eq!(opened.lock().unwrap().len(), 1);
+         let ctx = egui::Context::default();
+-        theme::install_fonts(&ctx);
++        crate::theme::install_fonts(&ctx);
+         let mut out = ctx.run_ui(egui::RawInput::default(), |ui| links(&mut app, ui));
+         out.textures_delta.clear();
+     }
+diff --git a/crates/ui-egui/src/dialogs/about.rs b/crates/ui-egui/src/dialogs/about.rs
+index e24587e..a2314e8 100644
+--- a/crates/ui-egui/src/dialogs/about.rs
++++ b/crates/ui-egui/src/dialogs/about.rs
+@@ -62,9 +62,11 @@ fn about_tab(app: &mut VectorcraftApp, ui: &mut egui::Ui) {
+     ui.add_space(12.0);
+     crate::community::links(app, ui);
+     ui.add_space(12.0);
++    ui.label("Based on VectorCraft by the ArtCraft team (MIT or Apache-2.0), modified for Hanpan.");
++    ui.add_space(6.0);
+     ui.label(
+         egui::RichText::new(tl!(
+-            "Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft."
++            "MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft."
+         ))
+         .size(11.0),
+     );
+diff --git a/crates/ui-egui/src/i18n/bg.tsv b/crates/ui-egui/src/i18n/bg.tsv
+index 073f577..db764bf 100644
+--- a/crates/ui-egui/src/i18n/bg.tsv
++++ b/crates/ui-egui/src/i18n/bg.tsv
+@@ -228,8 +228,6 @@ font-technology	Variable	Променливи
+ 	Artboard {number}	Работна област {number}
+ 	Artboard:	Работна област:
+ 	Artboards	Работни области
+-	ArtCraft Website	Уебсайт на ArtCraft
+-	ArtCraft website	Уебсайт на ArtCraft
+ 	Artwork Colors	Цветове на произведението
+ 	As Multiple Assets	Като множество активи
+ 	As Single Asset	Като един актив
+@@ -781,7 +779,6 @@ font-technology	Variable	Променливи
+ 	Discard Empty Type	Отхвърляне на празен текст
+ 	Discard Recovered Documents	Отхвърляне на възстановени документи
+ 	Discard White Overprint in Output	Премахване на бял надпечат при изход
+-	Discord	Discord
+ 	Discretionary Hyphen	Избираемо сричкопренасяне
+ 	Discretionary Ligatures	Избираеми лигатури
+ 	Display All Blacks Accurately	Показване на цялото черно точно
+@@ -1582,9 +1579,6 @@ font-technology	Variable	Променливи
+ 	Italian	Италиански
+ 	Japanese	Японски
+ 	Join	Свързване
+-	Join Our Discord	Присъединете се към нашия Discord
+-	Join our Discord	Присъединете се към нашия Discord
+-	Join the ArtCraft community on Discord (discord.gg/artcraft)	Присъединете се към общността на ArtCraft в Discord (discord.gg/artcraft)
+ 	Join the lines of each paragraph	Свързване на редовете на всеки параграф
+ 	Join Tool	Инструмент „Свързване“
+ 	Justification…	Подравняване…
+@@ -2252,7 +2246,7 @@ font-technology	Variable	Променливи
+ 	Paragraph Style Options	Опции за стил на абзац
+ 	Paragraph Styles	Стилове на абзац
+ 	Paragraph Symbol	Символ за абзац
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	Част от ArtCraft. MIT ИЛИ Apache-2.0. Шрифтове: Source Sans 3, Inter, JetBrains Mono (OFL). Икони: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT ИЛИ Apache-2.0. Шрифтове: Source Sans 3, Inter, JetBrains Mono (OFL). Икони: Lucide (ISC) + VectorCraft.
+ 	Password	Парола
+ 	Paste	Поставяне
+ 	Paste in Back	Поставяне отзад
+@@ -3568,7 +3562,6 @@ digits	Malayalam	Малаялам
+ 	Vector illustration — fast, open, scriptable.	Векторна илюстрация — бърза, отворена, скриптуема.
+ 	VectorCraft didn't quit normally last time. These documents had unsaved changes:	VectorCraft не се затвори нормално последния път. Тези документи съдържаха незапазени промени:
+ 	VectorCraft Help…	Помощ за VectorCraft…
+-	VectorCraft on getartcraft.com	VectorCraft в getartcraft.com
+ 	VectorCraft on GitHub	VectorCraft в GitHub
+ 	Vectors	Вектори
+ 	Version {version} — open-source vector illustration in pure Rust.	Версия {version} — векторна илюстрация с отворен код на чист Rust.
+@@ -5049,7 +5042,7 @@ lighting	Light	Светлина
+ 	PDF/X-4:2010	PDF/X-4:2010
+ 	PRs	ПР-и
+ 	Page Cover 1640×624	Корица на страница 1640×624
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	Част от ArtCraft. MIT ИЛИ Apache-2.0. Шрифтове: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Икони: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT ИЛИ Apache-2.0. Шрифтове: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Икони: Lucide (ISC) + VectorCraft.
+ 	Pattern Swatches	Образци на мостри
+ 	Pen	Перо
+ 	Pentagram	Петограм
+diff --git a/crates/ui-egui/src/i18n/bs.tsv b/crates/ui-egui/src/i18n/bs.tsv
+index 80e02fb..5bfc68a 100644
+--- a/crates/ui-egui/src/i18n/bs.tsv
++++ b/crates/ui-egui/src/i18n/bs.tsv
+@@ -19,7 +19,6 @@
+ 	About VectorCraft	O VectorCraftu
+ 	Align to Path	Poravnaj s putanjom
+ 	Cut Path at Selected Anchor Points	Presijeci putanju na odabranim sidrenim tačkama
+-	Join Our Discord	Pridružite se našem Discordu
+ 	Language	Jezik
+ 	UI Brightness	Svjetlina interfejsa
+ 	Dark	Tamno
+@@ -748,8 +747,6 @@
+ 	Save Swatch Library…	Sačuvaj biblioteku uzoraka boja…
+ 	Symbol Libraries	Biblioteke simbola
+ 	Help	Pomoć
+-	ArtCraft Website	Web stranica ArtCrafta
+-	VectorCraft on getartcraft.com	VectorCraft na getartcraft.com
+ 	VectorCraft on GitHub	VectorCraft na GitHubu
+ 	Search Commands…	Pretraži naredbe…
+ 	VectorCraft Help…	Pomoć za VectorCraft…
+@@ -2074,8 +2071,8 @@ digits	Malayalam	Malajalam
+ 	Select All Bound Objects	Odaberi sve vezane objekte
+ 	Multiple objects	Više objekata
+ 	Graphics: {adapter}	Grafika: {adapter}
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	Dio ArtCrafta. MIT OR Apache-2.0. Fontovi: Source Sans 3, Inter, JetBrains Mono (OFL). Ikone: Lucide (ISC) + VectorCraft.
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	Dio ArtCrafta. MIT OR Apache-2.0. Fontovi: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Ikone: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. Fontovi: Source Sans 3, Inter, JetBrains Mono (OFL). Ikone: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. Fontovi: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Ikone: Lucide (ISC) + VectorCraft.
+ 	Version {version} — open-source vector illustration in pure Rust.	Verzija {version} — vektorska ilustracija otvorenog koda u čistom Rustu.
+ 	Align to Page	Poravnaj sa stranicom
+ 	Smooth Color	Glatka boja
+@@ -3894,10 +3891,6 @@ effect	Regular	Obično
+ 	Recent Files	Nedavne datoteke
+ 	Vector illustration — fast, open, scriptable.	Vektorska ilustracija — brza, otvorena, skriptabilna.
+ 	Welcome to VectorCraft	Dobro došli u VectorCraft
+-	ArtCraft website	Web stranica ArtCrafta
+-	Discord	Discord
+-	Join our Discord	Pridružite nam se na Discordu
+-	Join the ArtCraft community on Discord (discord.gg/artcraft)	Pridružite se ArtCraft zajednici na Discordu (discord.gg/artcraft)
+ 	Source code on GitHub	Izvorni kod na GitHubu
+ 	All Tools	Svi alati
+ 	Draw	Crtaj
+diff --git a/crates/ui-egui/src/i18n/ca.tsv b/crates/ui-egui/src/i18n/ca.tsv
+index b6985fb..f1a343d 100644
+--- a/crates/ui-egui/src/i18n/ca.tsv
++++ b/crates/ui-egui/src/i18n/ca.tsv
+@@ -365,8 +365,6 @@
+ 	Artboard:	Tauler:
+ 	Artboards	Taulers
+ 	Artboards: {n}	Taulers: {n}
+-	ArtCraft Website	Lloc web d’ArtCraft
+-	ArtCraft website	Lloc web d’ArtCraft
+ 	Artistic	Artístic
+ 	Artwork	Art
+ 	Artwork Colors	Colors de l’art
+@@ -1124,7 +1122,6 @@
+ 	Discard Empty Type	Descarta el text buit
+ 	Discard Recovered Documents	Descarta els documents recuperats
+ 	Discard White Overprint in Output	Descarta la sobrempressió del blanc a la sortida
+-	Discord	Discord
+ 	Discretionary Hyphen	Guionet discrecional
+ 	Discretionary Ligatures	Lligadures discrecionals
+ 	Display	Mostra
+@@ -2032,9 +2029,6 @@ digits	Malayalam	Malaiàlam
+ 	JavaScript Files	Fitxers JavaScript
+ 	JavaScript:	JavaScript:
+ 	Join	Uneix
+-	Join Our Discord	Uneix-te al nostre Discord
+-	Join our Discord	Uneix-te al nostre Discord
+-	Join the ArtCraft community on Discord (discord.gg/artcraft)	Uneix-te a la comunitat ArtCraft a Discord (discord.gg/artcraft)
+ 	Join the lines of each paragraph	Uneix les línies de cada paràgraf
+ 	Join Tool	Eina d’unió
+ 	Joins	Unions
+@@ -2867,8 +2861,8 @@ digits	Malayalam	Malaiàlam
+ 	Paragraph Style Options	Opcions de l’estil de paràgraf
+ 	Paragraph Styles	Estils de paràgraf
+ 	Paragraph Symbol	Símbol de paràgraf
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	Forma part d’ArtCraft. MIT OR Apache-2.0. Tipus de lletra: Source Sans 3, Inter, JetBrains Mono (OFL). Icones: Lucide (ISC) + VectorCraft.
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	Forma part d’ArtCraft. MIT OR Apache-2.0. Tipus de lletra: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icones: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. Tipus de lletra: Source Sans 3, Inter, JetBrains Mono (OFL). Icones: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. Tipus de lletra: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icones: Lucide (ISC) + VectorCraft.
+ 	Password	Contrasenya
+ 	Paste	Enganxa
+ 	Paste Design	Enganxa el disseny
+@@ -4571,7 +4565,6 @@ digits	Malayalam	Malaiàlam
+ 	VectorCraft documents: one locked object, updated when the file changes.	Documents de VectorCraft: un objecte bloquejat, actualitzat quan canvia el fitxer.
+ 	VectorCraft Generic CMYK (SWOP-like)	CMYK genèric de VectorCraft (similar a SWOP)
+ 	VectorCraft Help…	Ajuda de VectorCraft…
+-	VectorCraft on getartcraft.com	VectorCraft a getartcraft.com
+ 	VectorCraft on GitHub	VectorCraft al GitHub
+ 	VectorCraft read this script without running it.	VectorCraft ha llegit aquest script sense executar-lo.
+ 	VectorCraft Swatches (.vcswatches)	Mostres de VectorCraft (.vcswatches)
+diff --git a/crates/ui-egui/src/i18n/cs.tsv b/crates/ui-egui/src/i18n/cs.tsv
+index 367be32..6e2582d 100644
+--- a/crates/ui-egui/src/i18n/cs.tsv
++++ b/crates/ui-egui/src/i18n/cs.tsv
+@@ -26,7 +26,6 @@
+ 	About VectorCraft	O aplikaci VectorCraft
+ 	Align to Path	Zarovnat k cestě
+ 	Cut Path at Selected Anchor Points	Rozdělit cestu ve vybraných kotevních bodech
+-	Join Our Discord	Připojit se k našemu Discordu
+ 	Language	Jazyk
+ 	UI Brightness	Jas rozhraní
+ 	Dark	Tmavý
+@@ -756,8 +755,6 @@
+ 	Save Swatch Library…	Uložit knihovnu vzorníku…
+ 	Symbol Libraries	Knihovny symbolů
+ 	Help	Nápověda
+-	ArtCraft Website	Web ArtCraft
+-	VectorCraft on getartcraft.com	VectorCraft na getartcraft.com
+ 	VectorCraft on GitHub	VectorCraft na GitHubu
+ 	Search Commands…	Hledat příkazy…
+ 	VectorCraft Help…	Nápověda VectorCraft…
+@@ -2103,8 +2100,8 @@ digits	Malayalam	Malajálamské
+ 
+ # Dialogs
+ 	Graphics: {adapter}	Grafika: {adapter}
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	Součást ArtCraft. MIT OR Apache-2.0. Písma: Source Sans 3, Inter, JetBrains Mono (OFL). Ikony: Lucide (ISC) + VectorCraft.
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	Součást ArtCraft. MIT OR Apache-2.0. Písma: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Ikony: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. Písma: Source Sans 3, Inter, JetBrains Mono (OFL). Ikony: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. Písma: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Ikony: Lucide (ISC) + VectorCraft.
+ 	Version {version} — open-source vector illustration in pure Rust.	Verze {version} — open-source vektorová ilustrace v čistém Rustu.
+ 	Align to Page	Zarovnat ke stránce
+ 	Smooth Color	Plynulá barva
+@@ -3936,10 +3933,6 @@ effect	Regular	Pravidelný
+ 	Recent Files	Nedávné soubory
+ 	Vector illustration — fast, open, scriptable.	Vektorová ilustrace — rychlá, otevřená, skriptovatelná.
+ 	Welcome to VectorCraft	Vítejte ve VectorCraftu
+-	ArtCraft website	Web ArtCraft
+-	Discord	Discord
+-	Join our Discord	Připojit se k našemu Discordu
+-	Join the ArtCraft community on Discord (discord.gg/artcraft)	Připojte se ke komunitě ArtCraft na Discordu (discord.gg/artcraft)
+ 	Source code on GitHub	Zdrojový kód na GitHubu
+ 	All Tools	Všechny nástroje
+ 	Draw	Kresba
+diff --git a/crates/ui-egui/src/i18n/da.tsv b/crates/ui-egui/src/i18n/da.tsv
+index 7b077a5..b7e54ba 100644
+--- a/crates/ui-egui/src/i18n/da.tsv
++++ b/crates/ui-egui/src/i18n/da.tsv
+@@ -12,7 +12,6 @@
+ 	About VectorCraft	Om VectorCraft
+ 	Align to Path	Justér til kurve
+ 	Cut Path at Selected Anchor Points	Klip kurve ved valgte ankerpunkter
+-	Join Our Discord	Slut dig til vores Discord
+ 	Language	Sprog
+ 	UI Brightness	Lysstyrke i brugerfladen
+ 	Dark	Mørk
+@@ -693,8 +692,6 @@
+ 	Save Swatch Library…	Gem bibliotek med farveprøver…
+ 	Symbol Libraries	Symbolbiblioteker
+ 	Help	Hjælp
+-	ArtCraft Website	ArtCrafts websted
+-	VectorCraft on getartcraft.com	VectorCraft på getartcraft.com
+ 	VectorCraft on GitHub	VectorCraft på GitHub
+ 	Search Commands…	Søg i kommandoer…
+ 	VectorCraft Help…	Hjælp til VectorCraft…
+@@ -1906,8 +1903,8 @@ digits	Malayalam	Malayalam
+ 	Select All Bound Objects	Markér alle bundne objekter
+ 	Multiple objects	Flere objekter
+ 	Graphics: {adapter}	Grafik: {adapter}
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	Del af ArtCraft. MIT OR Apache-2.0. Skrifttyper: Source Sans 3, Inter, JetBrains Mono (OFL). Ikoner: Lucide (ISC) + VectorCraft.
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	Del af ArtCraft. MIT OR Apache-2.0. Skrifttyper: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Ikoner: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. Skrifttyper: Source Sans 3, Inter, JetBrains Mono (OFL). Ikoner: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. Skrifttyper: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Ikoner: Lucide (ISC) + VectorCraft.
+ 	Version {version} — open-source vector illustration in pure Rust.	Version {version} — open source-vektorillustration i ren Rust.
+ 	Align to Page	Justér til side
+ 	Smooth Color	Jævn farve
+@@ -3656,10 +3653,6 @@ effect	Regular	Regular
+ 	Recent Files	Seneste filer
+ 	Vector illustration — fast, open, scriptable.	Vektorillustration — hurtig, åben, scriptbar.
+ 	Welcome to VectorCraft	Velkommen til VectorCraft
+-	ArtCraft website	ArtCraft-websted
+-	Discord	Discord
+-	Join our Discord	Deltag i vores Discord
+-	Join the ArtCraft community on Discord (discord.gg/artcraft)	Deltag i ArtCraft-fællesskabet på Discord (discord.gg/artcraft)
+ 	Source code on GitHub	Kildekode på GitHub
+ 	All Tools	Alle værktøjer
+ 	Draw	Tegn
+diff --git a/crates/ui-egui/src/i18n/de.tsv b/crates/ui-egui/src/i18n/de.tsv
+index c87b45d..b801bc1 100644
+--- a/crates/ui-egui/src/i18n/de.tsv
++++ b/crates/ui-egui/src/i18n/de.tsv
+@@ -216,8 +216,6 @@ font-technology	Variable	Variabel
+ 	Artboard {number}	Zeichenfläche {number}
+ 	Artboard:	Zeichenfläche:
+ 	Artboards	Zeichenflächen
+-	ArtCraft Website	ArtCraft-Website
+-	ArtCraft website	ArtCraft-Website
+ 	Artwork Colors	Farben der Grafik
+ 	As Multiple Assets	Als mehrere Assets
+ 	As Single Asset	Als einzelnes Asset
+@@ -775,7 +773,6 @@ font-technology	Variable	Variabel
+ 	Discard Empty Type	Leeren Text verwerfen
+ 	Discard Recovered Documents	Wiederhergestellte Dokumente verwerfen
+ 	Discard White Overprint in Output	Weißes Überdrucken in der Ausgabe verwerfen
+-	Discord	Discord
+ 	Discretionary Hyphen	Bedingter Trennstrich
+ 	Discretionary Ligatures	Bedingte Ligaturen
+ 	Display All Blacks Accurately	Alle Schwarztöne genau anzeigen
+@@ -1627,9 +1624,6 @@ file-filter	Templates	Vorlagen
+ 	Italian	Italienisch
+ 	Japanese	Japanisch
+ 	Join	Zusammenfügen
+-	Join Our Discord	Unserem Discord beitreten
+-	Join our Discord	Unserem Discord beitreten
+-	Join the ArtCraft community on Discord (discord.gg/artcraft)	Treten Sie der ArtCraft-Community auf Discord bei (discord.gg/artcraft)
+ 	Join the lines of each paragraph	Die Zeilen jedes Absatzes verbinden
+ 	Join Tool	Zusammenfügen-Werkzeug
+ 	Justification…	Abstände…
+@@ -2273,7 +2267,7 @@ file-filter	Templates	Vorlagen
+ 	Paragraph Style Options	Absatzformatoptionen
+ 	Paragraph Styles	Absatzformate
+ 	Paragraph Symbol	Absatzmarke
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	Teil von ArtCraft. MIT OR Apache-2.0. Schriften: Source Sans 3, Inter, JetBrains Mono (OFL). Symbole: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. Schriften: Source Sans 3, Inter, JetBrains Mono (OFL). Symbole: Lucide (ISC) + VectorCraft.
+ 	Password	Kennwort
+ 	Paste	Einfügen
+ 	Paste in Back	Dahinter einfügen
+@@ -3562,7 +3556,6 @@ effect	Points	Punkte
+ 	Vector illustration — fast, open, scriptable.	Vektorillustration – schnell, offen, skriptfähig.
+ 	VectorCraft didn't quit normally last time. These documents had unsaved changes:	VectorCraft wurde beim letzten Mal nicht normal beendet. Diese Dokumente hatten ungespeicherte Änderungen:
+ 	VectorCraft Help…	VectorCraft-Hilfe…
+-	VectorCraft on getartcraft.com	VectorCraft auf getartcraft.com
+ 	VectorCraft on GitHub	VectorCraft auf GitHub
+ 	Vectors	Vektoren
+ 	Version {version} — open-source vector illustration in pure Rust.	Version {version} – Open-Source-Vektorillustration in reinem Rust.
+diff --git a/crates/ui-egui/src/i18n/el.tsv b/crates/ui-egui/src/i18n/el.tsv
+index 615e0e6..2bad457 100644
+--- a/crates/ui-egui/src/i18n/el.tsv
++++ b/crates/ui-egui/src/i18n/el.tsv
+@@ -220,7 +220,6 @@ font-technology	Variable	Μεταβλητές
+ 	Artboard {number}	Πίνακας σχεδίασης {number}
+ 	Artboard:	Πίνακας σχεδίασης:
+ 	Artboards	Πίνακες σχεδίασης
+-	ArtCraft Website	Ιστότοπος ArtCraft
+ 	Artwork Colors	Χρώματα γραφικού
+ 	As Multiple Assets	Ως πολλαπλά στοιχεία
+ 	As Single Asset	Ως ένα στοιχείο
+@@ -755,7 +754,6 @@ font-technology	Variable	Μεταβλητές
+ 	Discard Empty Type	Απόρριψη κενού κειμένου
+ 	Discard Recovered Documents	Απόρριψη ανακτημένων εγγράφων
+ 	Discard White Overprint in Output	Παράλειψη λευκής επιτύπωσης στην έξοδο
+-	Discord	Discord
+ 	Discretionary Hyphen	Προαιρετικό ενωτικό
+ 	Discretionary Ligatures	Προαιρετικά συμπλέγματα χαρακτήρων
+ 	Display All Blacks Accurately	Ακριβής απεικόνιση όλων των μαύρων
+@@ -1547,8 +1545,6 @@ font-technology	Variable	Μεταβλητές
+ 	Isolate Blending	Απομόνωση ανάμειξης
+ 	Isolate Group	Απομόνωση ομάδας
+ 	Join	Ένωση
+-	Join Our Discord	Ελάτε στο Discord μας
+-	Join our Discord	Ελάτε στο Discord μας
+ 	Join the lines of each paragraph	Ένωση γραμμών κάθε παραγράφου
+ 	Join Tool	Ένωση (Join Tool)
+ 	Justification…	Πλήρης στοίχιση…
+@@ -2520,7 +2516,6 @@ theme	Appearance	Εμφάνιση
+ 	A lower value follows the stroke closely; a higher one gives fewer points and smoother curves.	Μια μικρότερη τιμή ακολουθεί πιστά το περίγραμμα· μια μεγαλύτερη δημιουργεί λιγότερα σημεία και πιο ομαλές καμπύλες.
+ 	Applies when the linked file is relinked or updated.	Εφαρμόζεται όταν το συνδεδεμένο αρχείο επανασυνδέεται ή ενημερώνεται.
+ 	Art using a deleted global swatch keeps its colour.	Τα σχέδια που χρησιμοποιούν διαγραμμένο καθολικό δείγμα διατηρούν το χρώμα τους.
+-	ArtCraft website	Ιστότοπος ArtCraft
+ 	Built-in presets are read-only: New… starts an editable copy.	Οι ενσωματωμένες προεπιλογές είναι μόνο για ανάγνωση: το Νέο… δημιουργεί επεξεργάσιμο αντίγραφο.
+ 	Built-in presets don't change: New makes a copy you can edit.	Οι ενσωματωμένες προεπιλογές δεν τροποποιούνται: το Νέο δημιουργεί αντίγραφο για επεξεργασία.
+ 	Built-in presets don't change: New… starts an editable copy.	Οι ενσωματωμένες προεπιλογές δεν τροποποιούνται: το Νέο… δημιουργεί επεξεργάσιμο αντίγραφο.
+@@ -2549,7 +2544,6 @@ theme	Appearance	Εμφάνιση
+ 	How colours outside the press's gamut are separated.	Πώς διαχωρίζονται τα χρώματα εκτός της χρωματικής γκάμας του τυπογραφικού πιεστηρίου.
+ 	Italian	Ιταλικά
+ 	Japanese	Ιαπωνικά
+-	Join the ArtCraft community on Discord (discord.gg/artcraft)	Γίνετε μέλος της κοινότητας ArtCraft στο Discord (discord.gg/artcraft)
+ 	Keep a link to an image file instead of only embedding it	Διατήρηση συνδέσμου προς το αρχείο εικόνας αντί μόνο της ενσωμάτωσής του
+ 	Keep the pasted color as a new swatch with a numbered name.	Διατήρηση του επικολλημένου χρώματος ως νέο δείγμα με αριθμημένο όνομα.
+ 	Each entry of the file is matched to a VectorCraft tool, command or panel. Check the matches and answer what is left.	Κάθε καταχώριση του αρχείου αντιστοιχίζεται σε εργαλείο, εντολή ή πίνακα του VectorCraft. Ελέγξτε τις αντιστοιχίσεις και συμπληρώστε όσα απομένουν.
+@@ -2962,7 +2956,7 @@ theme	Appearance	Εμφάνιση
+ 	Paragraph Style	Στυλ παραγράφου
+ 	Paragraph Style Options	Επιλογές στυλ παραγράφου
+ 	Paragraph Symbol	Σύμβολο παραγράφου
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	Μέρος του ArtCraft. MIT ή Apache-2.0. Γραμματοσειρές: Source Sans 3, Inter, JetBrains Mono (OFL). Εικονίδια: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT ή Apache-2.0. Γραμματοσειρές: Source Sans 3, Inter, JetBrains Mono (OFL). Εικονίδια: Lucide (ISC) + VectorCraft.
+ 	Password	Κωδικός πρόσβασης
+ 	Paste in Back	Επικόλληση στο πίσω μέρος
+ 	Paste in Front	Επικόλληση στο μπροστινό μέρος
+@@ -3914,7 +3908,6 @@ digits	Malayalam	Μαλαγιάλαμ
+ 	Vector illustration — fast, open, scriptable.	Διανυσματική σχεδίαση — γρήγορη, ανοιχτή και αυτοματοποιήσιμη.
+ 	VectorCraft didn't quit normally last time. These documents had unsaved changes:	Το VectorCraft δεν τερματίστηκε κανονικά την προηγούμενη φορά. Τα ακόλουθα έγγραφα είχαν μη αποθηκευμένες αλλαγές:
+ 	VectorCraft Help…	Βοήθεια VectorCraft…
+-	VectorCraft on getartcraft.com	VectorCraft στο getartcraft.com
+ 	VectorCraft on GitHub	VectorCraft στο GitHub
+ 	Vectors	Διανύσματα
+ 	Version {version} — open-source vector illustration in pure Rust.	Έκδοση {version} — διανυσματική σχεδίαση ανοιχτού κώδικα εξ ολοκλήρου σε Rust.
+@@ -4934,7 +4927,7 @@ digits	Malayalam	Μαλαγιάλαμ
+ 	Outlined Text	Κείμενο ως περιγράμματα
+ 	PRs	Αιτήματα συγχώνευσης
+ 	Page Cover 1640×624	Εξώφυλλο σελίδας 1640×624
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	Μέρος του ArtCraft. MIT ή Apache-2.0. Γραμματοσειρές: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Εικονίδια: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT ή Apache-2.0. Γραμματοσειρές: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Εικονίδια: Lucide (ISC) + VectorCraft.
+ 	Pattern Swatches	Δείγματα μοτίβων
+ 	Pentagram	Πεντάγραμμο
+ 	Photo Low Fidelity	Φωτογραφία χαμηλής πιστότητας
+diff --git a/crates/ui-egui/src/i18n/es.tsv b/crates/ui-egui/src/i18n/es.tsv
+index c4d4a19..e95866f 100644
+--- a/crates/ui-egui/src/i18n/es.tsv
++++ b/crates/ui-egui/src/i18n/es.tsv
+@@ -241,8 +241,6 @@ font-technology	Variable	Variables
+ 	Artboard {number}	Mesa de trabajo {number}
+ 	Artboard:	Mesa de trabajo:
+ 	Artboards	Mesas de trabajo
+-	ArtCraft Website	Sitio web de ArtCraft
+-	ArtCraft website	Sitio web de ArtCraft
+ 	Artwork Colors	Colores de la ilustración
+ 	As Multiple Assets	Como varios recursos
+ 	As Single Asset	Como un solo recurso
+@@ -796,7 +794,6 @@ font-technology	Variable	Variables
+ 	Discard Empty Type	Descartar texto vacío
+ 	Discard Recovered Documents	Descartar documentos recuperados
+ 	Discard White Overprint in Output	Descartar sobreimpresión de blanco en la salida
+-	Discord	Discord
+ 	Discretionary Hyphen	Guion discrecional
+ 	Discretionary Ligatures	Ligaduras discrecionales
+ 	Display All Blacks Accurately	Mostrar todos los negros con precisión
+@@ -1632,9 +1629,6 @@ font-technology	Variable	Variables
+ 	Italian	Italiano
+ 	Japanese	Japonés
+ 	Join	Unir
+-	Join Our Discord	Únete a nuestro Discord
+-	Join our Discord	Únete a nuestro Discord
+-	Join the ArtCraft community on Discord (discord.gg/artcraft)	Únete a la comunidad de ArtCraft en Discord (discord.gg/artcraft)
+ 	Join the lines of each paragraph	Unir las líneas de cada párrafo
+ 	Join Tool	Herramienta Unir
+ 	Justification…	Justificación…
+@@ -2320,7 +2314,7 @@ font-technology	Variable	Variables
+ 	Paragraph Style Options	Opciones de estilo de párrafo
+ 	Paragraph Styles	Estilos de párrafo
+ 	Paragraph Symbol	Símbolo de párrafo
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	Parte de ArtCraft. MIT OR Apache-2.0. Fuentes: Source Sans 3, Inter, JetBrains Mono (OFL). Iconos: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. Fuentes: Source Sans 3, Inter, JetBrains Mono (OFL). Iconos: Lucide (ISC) + VectorCraft.
+ 	Password	Contraseña
+ 	Paste	Pegar
+ 	Paste in Back	Pegar detrás
+@@ -3652,7 +3646,6 @@ digits	Malayalam	Malayálam
+ 	Vector illustration — fast, open, scriptable.	Ilustración vectorial: rápida, abierta y programable.
+ 	VectorCraft didn't quit normally last time. These documents had unsaved changes:	VectorCraft no se cerró correctamente la última vez. Estos documentos tenían cambios sin guardar:
+ 	VectorCraft Help…	Ayuda de VectorCraft…
+-	VectorCraft on getartcraft.com	VectorCraft en getartcraft.com
+ 	VectorCraft on GitHub	VectorCraft en GitHub
+ 	Vectors	Vectores
+ 	Version {version} — open-source vector illustration in pure Rust.	Versión {version}: ilustración vectorial de código abierto en Rust puro.
+diff --git a/crates/ui-egui/src/i18n/fi.tsv b/crates/ui-egui/src/i18n/fi.tsv
+index 7d57116..e576d1d 100644
+--- a/crates/ui-egui/src/i18n/fi.tsv
++++ b/crates/ui-egui/src/i18n/fi.tsv
+@@ -34,7 +34,6 @@
+ 	About VectorCraft	Tietoja VectorCraftista
+ 	Align to Path	Tasaa polkuun
+ 	Cut Path at Selected Anchor Points	Leikkaa polku valituista ankkuripisteistä
+-	Join Our Discord	Liity Discordiimme
+ 	Language	Kieli
+ 	UI Brightness	Käyttöliittymän kirkkaus
+ 	Dark	Tumma
+@@ -747,8 +746,6 @@
+ 	Save Swatch Library…	Tallenna värimallikirjasto…
+ 	Symbol Libraries	Symbolikirjastot
+ 	Help	Ohje
+-	ArtCraft Website	ArtCraft-verkkosivusto
+-	VectorCraft on getartcraft.com	VectorCraft getartcraft.comissa
+ 	VectorCraft on GitHub	VectorCraft GitHubissa
+ 	Search Commands…	Hae komentoja…
+ 	VectorCraft Help…	VectorCraft-ohje…
+@@ -2062,8 +2059,8 @@ digits	Malayalam	Malajalam
+ 	Select All Bound Objects	Valitse kaikki sidotut objektit
+ 	Multiple objects	Useita objekteja
+ 	Graphics: {adapter}	Grafiikka: {adapter}
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	Osa ArtCraftia. MIT OR Apache-2.0. Fontit: Source Sans 3, Inter, JetBrains Mono (OFL). Kuvakkeet: Lucide (ISC) + VectorCraft.
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	Osa ArtCraftia. MIT OR Apache-2.0. Fontit: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Kuvakkeet: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. Fontit: Source Sans 3, Inter, JetBrains Mono (OFL). Kuvakkeet: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. Fontit: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Kuvakkeet: Lucide (ISC) + VectorCraft.
+ 	Version {version} — open-source vector illustration in pure Rust.	Versio {version} — avoimen lähdekoodin vektorikuvitusohjelma puhtaalla Rustilla.
+ 	Align to Page	Tasaa sivuun
+ 	Smooth Color	Tasainen väri
+@@ -3855,10 +3852,6 @@ effect	Regular	Normaali
+ 	Recent Files	Viimeisimmät tiedostot
+ 	Vector illustration — fast, open, scriptable.	Vektorikuvitusta – nopea, avoin, skriptattava.
+ 	Welcome to VectorCraft	Tervetuloa VectorCraftiin
+-	ArtCraft website	ArtCraftin verkkosivusto
+-	Discord	Discord
+-	Join our Discord	Liity Discordiimme
+-	Join the ArtCraft community on Discord (discord.gg/artcraft)	Liity ArtCraft-yhteisöön Discordissa (discord.gg/artcraft)
+ 	Source code on GitHub	Lähdekoodi GitHubissa
+ 	All Tools	Kaikki työkalut
+ 	Draw	Piirrä
+diff --git a/crates/ui-egui/src/i18n/fr.tsv b/crates/ui-egui/src/i18n/fr.tsv
+index 4372280..6b3425d 100644
+--- a/crates/ui-egui/src/i18n/fr.tsv
++++ b/crates/ui-egui/src/i18n/fr.tsv
+@@ -242,8 +242,6 @@ font-technology	Variable	Variables
+ 	Artboard {number}	Plan de travail {number}
+ 	Artboard:	Plan de travail :
+ 	Artboards	Plans de travail
+-	ArtCraft Website	Site web d’ArtCraft
+-	ArtCraft website	Site web d’ArtCraft
+ 	Artwork Colors	Couleurs de l’illustration
+ 	As Multiple Assets	En plusieurs ressources
+ 	As Single Asset	En une seule ressource
+@@ -799,7 +797,6 @@ font-technology	Variable	Variables
+ 	Discard Empty Type	Supprimer le texte vide
+ 	Discard Recovered Documents	Ignorer les documents récupérés
+ 	Discard White Overprint in Output	Ignorer la surimpression du blanc en sortie
+-	Discord	Discord
+ 	Discretionary Hyphen	Tiret conditionnel
+ 	Discretionary Ligatures	Ligatures conditionnelles
+ 	Display All Blacks Accurately	Afficher tous les noirs avec précision
+@@ -1626,9 +1623,6 @@ font-technology	Variable	Variables
+ 	Italian	Italien
+ 	Japanese	Japonais
+ 	Join	Joindre
+-	Join Our Discord	Rejoignez notre Discord
+-	Join our Discord	Rejoignez notre Discord
+-	Join the ArtCraft community on Discord (discord.gg/artcraft)	Rejoignez la communauté ArtCraft sur Discord (discord.gg/artcraft)
+ 	Join the lines of each paragraph	Joindre les lignes de chaque paragraphe
+ 	Join Tool	Outil Jonction
+ 	Justification…	Justification…
+@@ -2312,7 +2306,7 @@ font-technology	Variable	Variables
+ 	Paragraph Style Options	Options de style de paragraphe
+ 	Paragraph Styles	Styles de paragraphe
+ 	Paragraph Symbol	Symbole de paragraphe
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	Fait partie d’ArtCraft. MIT OR Apache-2.0. Polices : Source Sans 3, Inter, JetBrains Mono (OFL). Icônes : Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. Polices : Source Sans 3, Inter, JetBrains Mono (OFL). Icônes : Lucide (ISC) + VectorCraft.
+ 	Password	Mot de passe
+ 	Paste	Coller
+ 	Paste in Back	Coller derrière
+@@ -3644,7 +3638,6 @@ digits	Malayalam	Malayalam
+ 	Vector illustration — fast, open, scriptable.	Illustration vectorielle — rapide, ouverte, scriptable.
+ 	VectorCraft didn't quit normally last time. These documents had unsaved changes:	VectorCraft ne s’est pas fermé normalement la dernière fois. Ces documents comportaient des modifications non enregistrées :
+ 	VectorCraft Help…	Aide de VectorCraft…
+-	VectorCraft on getartcraft.com	VectorCraft sur getartcraft.com
+ 	VectorCraft on GitHub	VectorCraft sur GitHub
+ 	Vectors	Vecteurs
+ 	Version {version} — open-source vector illustration in pure Rust.	Version {version} — illustration vectorielle open source en pur Rust.
+@@ -5207,7 +5200,7 @@ lighting	Light	Lumière
+ 	PDF/X-4:2010	PDF/X-4:2010
+ 	PRs	PR
+ 	Page Cover 1640×624	Couverture de page 1640×624
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	Fait partie d’ArtCraft. MIT OR Apache-2.0. Polices : Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icônes : Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. Polices : Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icônes : Lucide (ISC) + VectorCraft.
+ 	Pattern Swatches	Nuances de motif
+ 	Pen	Plume
+ 	Pentagram	Pentagramme
+diff --git a/crates/ui-egui/src/i18n/hu.tsv b/crates/ui-egui/src/i18n/hu.tsv
+index 9890ecf..1d3e73b 100644
+--- a/crates/ui-egui/src/i18n/hu.tsv
++++ b/crates/ui-egui/src/i18n/hu.tsv
+@@ -338,8 +338,6 @@ font-technology	Variable	Változó
+ 	Artboard:	Rajztábla:
+ 	Artboards	Rajztáblák
+ 	Artboards: {n}	Rajztáblák: {n}
+-	ArtCraft Website	Az ArtCraft webhelye
+-	ArtCraft website	Az ArtCraft webhelye
+ 	Artwork Colors	Grafika színei
+ 	As Multiple Assets	Több elemként
+ 	As Single Asset	Egy elemként
+@@ -1036,7 +1034,6 @@ font-technology	Variable	Változó
+ 	Discard Empty Type	Üres szöveg elvetése
+ 	Discard Recovered Documents	Helyreállított dokumentumok elvetése
+ 	Discard White Overprint in Output	Fehér felülnyomás elvetése a kimenetben
+-	Discord	Discord
+ 	Discretionary Hyphen	Feltételes elválasztójel
+ 	Discretionary Ligatures	Választható ligatúrák
+ 	Display All Blacks Accurately	Minden fekete pontos megjelenítése
+@@ -2056,9 +2053,6 @@ file-filter	Templates	Sablonok
+ 	Its graphics, colors and text styles are deleted from this machine.	A grafikái, színei és szövegstílusai törlődnek erről a gépről.
+ 	Japanese	Japán
+ 	Join	Összekapcsolás
+-	Join Our Discord	Csatlakozz a Discordunkhoz
+-	Join our Discord	Csatlakozz a Discordunkhoz
+-	Join the ArtCraft community on Discord (discord.gg/artcraft)	Csatlakozz az ArtCraft-közösséghez a Discordon (discord.gg/artcraft)
+ 	Join the lines of each paragraph	Bekezdések sorainak összefűzése
+ 	Join Tool	Összekapcsolás
+ 	Joins	Csatlakozások
+@@ -2814,8 +2808,8 @@ file-filter	Templates	Sablonok
+ 	Paragraph Style Options	Bekezdésstílus beállításai
+ 	Paragraph Styles	Bekezdésstílusok
+ 	Paragraph Symbol	Bekezdésjel
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	Az ArtCraft része. MIT OR Apache-2.0. Betűtípusok: Source Sans 3, Inter, JetBrains Mono (OFL). Ikonok: Lucide (ISC) + VectorCraft.
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	Az ArtCraft része. MIT OR Apache-2.0. Betűtípusok: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Ikonok: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. Betűtípusok: Source Sans 3, Inter, JetBrains Mono (OFL). Ikonok: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. Betűtípusok: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Ikonok: Lucide (ISC) + VectorCraft.
+ 	Password	Jelszó
+ 	Paste	Beillesztés
+ 	Paste in Back	Beillesztés mögé
+@@ -4345,7 +4339,6 @@ mark-style	Japanese	Japán
+ 	VectorCraft documents: one locked object, updated when the file changes.	VectorCraft-dokumentumok: egyetlen zárolt objektum, amely a fájl változásakor frissül.
+ 	VectorCraft Generic CMYK (SWOP-like)	VectorCraft általános CMYK (SWOP-szerű)
+ 	VectorCraft Help…	VectorCraft súgó…
+-	VectorCraft on getartcraft.com	A VectorCraft a getartcraft.com oldalon
+ 	VectorCraft on GitHub	A VectorCraft a GitHubon
+ 	VectorCraft Swatches (.vcswatches)	VectorCraft-színminták (.vcswatches)
+ 	Vectors	Vektorok
+diff --git a/crates/ui-egui/src/i18n/id.tsv b/crates/ui-egui/src/i18n/id.tsv
+index d8ceeac..2fd177a 100644
+--- a/crates/ui-egui/src/i18n/id.tsv
++++ b/crates/ui-egui/src/i18n/id.tsv
+@@ -12,7 +12,6 @@
+ 	About VectorCraft	Tentang VectorCraft
+ 	Align to Path	Sejajarkan ke jalur
+ 	Cut Path at Selected Anchor Points	Potong jalur pada titik jangkar terseleksi
+-	Join Our Discord	Gabung ke Discord kami
+ 	Language	Bahasa
+ 	UI Brightness	Kecerahan UI
+ 	Dark	Gelap
+@@ -693,8 +692,6 @@
+ 	Save Swatch Library…	Simpan pustaka sampel warna…
+ 	Symbol Libraries	Pustaka simbol
+ 	Help	Bantuan
+-	ArtCraft Website	Situs web ArtCraft
+-	VectorCraft on getartcraft.com	VectorCraft di getartcraft.com
+ 	VectorCraft on GitHub	VectorCraft di GitHub
+ 	Search Commands…	Cari perintah…
+ 	VectorCraft Help…	Bantuan VectorCraft…
+@@ -1906,8 +1903,8 @@ digits	Malayalam	Malayalam
+ 	Select All Bound Objects	Pilih semua objek terikat
+ 	Multiple objects	Beberapa objek
+ 	Graphics: {adapter}	Grafis: {adapter}
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	Bagian dari ArtCraft. MIT OR Apache-2.0. Font: Source Sans 3, Inter, JetBrains Mono (OFL). Ikon: Lucide (ISC) + VectorCraft.
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	Bagian dari ArtCraft. MIT OR Apache-2.0. Font: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Ikon: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. Font: Source Sans 3, Inter, JetBrains Mono (OFL). Ikon: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. Font: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Ikon: Lucide (ISC) + VectorCraft.
+ 	Version {version} — open-source vector illustration in pure Rust.	Versi {version} — ilustrasi vektor sumber terbuka dalam Rust murni.
+ 	Align to Page	Ratakan ke halaman
+ 	Smooth Color	Warna mulus
+@@ -3656,10 +3653,6 @@ effect	Regular	Reguler
+ 	Recent Files	File terkini
+ 	Vector illustration — fast, open, scriptable.	Ilustrasi vektor — cepat, terbuka, mendukung skrip.
+ 	Welcome to VectorCraft	Selamat datang di VectorCraft
+-	ArtCraft website	Situs web ArtCraft
+-	Discord	Discord
+-	Join our Discord	Gabung ke Discord kami
+-	Join the ArtCraft community on Discord (discord.gg/artcraft)	Bergabunglah dengan komunitas ArtCraft di Discord (discord.gg/artcraft)
+ 	Source code on GitHub	Kode sumber di GitHub
+ 	All Tools	Semua alat
+ 	Draw	Menggambar
+diff --git a/crates/ui-egui/src/i18n/it.tsv b/crates/ui-egui/src/i18n/it.tsv
+index 1f6ffb4..0c1f053 100644
+--- a/crates/ui-egui/src/i18n/it.tsv
++++ b/crates/ui-egui/src/i18n/it.tsv
+@@ -241,8 +241,6 @@ font-technology	Variable	Variabili
+ 	Artboard {number}	Tavola da disegno {number}
+ 	Artboard:	Tavola da disegno:
+ 	Artboards	Tavole da disegno
+-	ArtCraft Website	Sito web di ArtCraft
+-	ArtCraft website	Sito web di ArtCraft
+ 	Artwork Colors	Colori della grafica
+ 	As Multiple Assets	Come più risorse
+ 	As Single Asset	Come risorsa unica
+@@ -796,7 +794,6 @@ font-technology	Variable	Variabili
+ 	Discard Empty Type	Scarta testo vuoto
+ 	Discard Recovered Documents	Scarta documenti recuperati
+ 	Discard White Overprint in Output	Scarta sovrastampa del bianco nell'output
+-	Discord	Discord
+ 	Discretionary Hyphen	Trattino facoltativo
+ 	Discretionary Ligatures	Legature facoltative
+ 	Display All Blacks Accurately	Visualizza tutti i neri con precisione
+@@ -1659,9 +1656,6 @@ file-filter	Templates	Modelli
+ 	Italian	Italiano
+ 	Japanese	Giapponese
+ 	Join	Unisci
+-	Join Our Discord	Unisciti al nostro Discord
+-	Join our Discord	Unisciti al nostro Discord
+-	Join the ArtCraft community on Discord (discord.gg/artcraft)	Unisciti alla comunità di ArtCraft su Discord (discord.gg/artcraft)
+ 	Join the lines of each paragraph	Unisci le righe di ogni paragrafo
+ 	Join Tool	Strumento Unisci
+ 	Justification…	Giustificazione…
+@@ -2349,7 +2343,7 @@ file-filter	Templates	Modelli
+ 	Paragraph Style Options	Opzioni stile paragrafo
+ 	Paragraph Styles	Stili paragrafo
+ 	Paragraph Symbol	Segno di paragrafo
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	Parte di ArtCraft. MIT OR Apache-2.0. Font: Source Sans 3, Inter, JetBrains Mono (OFL). Icone: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. Font: Source Sans 3, Inter, JetBrains Mono (OFL). Icone: Lucide (ISC) + VectorCraft.
+ 	Password	Password
+ 	Paste	Incolla
+ 	Paste in Back	Incolla dietro
+@@ -3689,7 +3683,6 @@ digits	Malayalam	Malayalam
+ 	Vector illustration — fast, open, scriptable.	Illustrazione vettoriale — veloce, aperta, programmabile.
+ 	VectorCraft didn't quit normally last time. These documents had unsaved changes:	VectorCraft non si è chiuso correttamente l'ultima volta. Questi documenti avevano modifiche non salvate:
+ 	VectorCraft Help…	Aiuto di VectorCraft…
+-	VectorCraft on getartcraft.com	VectorCraft su getartcraft.com
+ 	VectorCraft on GitHub	VectorCraft su GitHub
+ 	Vectors	Vettori
+ 	Version {version} — open-source vector illustration in pure Rust.	Versione {version} — illustrazione vettoriale open source in puro Rust.
+diff --git a/crates/ui-egui/src/i18n/ja.tsv b/crates/ui-egui/src/i18n/ja.tsv
+index 3d6849e..d776181 100644
+--- a/crates/ui-egui/src/i18n/ja.tsv
++++ b/crates/ui-egui/src/i18n/ja.tsv
+@@ -68,7 +68,6 @@ digits	Malayalam	マラヤーラム数字
+ 	Favorites	お気に入り
+ 	Flip	反転
+ 	Japanese	日本語
+-	Join Our Discord	Discord に参加
+ 	Line-end Punctuation Half Width	行末約物半角
+ 	Insert Kashidas	カシーダを挿入
+ 	Long	長い
+@@ -775,8 +774,6 @@ digits	Malayalam	マラヤーラム数字
+ 	Save Swatch Library…	スウォッチライブラリを保存…
+ 	Symbol Libraries	シンボルライブラリ
+ 	Help	ヘルプ
+-	ArtCraft Website	ArtCraft の Web サイト
+-	VectorCraft on getartcraft.com	getartcraft.com の VectorCraft
+ 	VectorCraft on GitHub	GitHub の VectorCraft
+ 	Search Commands…	コマンドを検索…
+ 	VectorCraft Help…	VectorCraft ヘルプ…
+@@ -989,7 +986,6 @@ digits	Malayalam	マラヤーラム数字
+ 	Arrange: Bring to Front	重ね順: 最前面へ
+ 	Arrowheads:	矢印:
+ 	Art using a deleted global swatch keeps its colour.	削除したグローバルスウォッチを使っているアートは、そのカラーを保持します。
+-	ArtCraft website	ArtCraft の Web サイト
+ 	Artboard Options	アートボードオプション
+ 	Artboard Options…	アートボードオプション…
+ 	Artboard Tool	アートボードツール
+@@ -1920,8 +1916,6 @@ digits	Malayalam	マラヤーラム数字
+ 	Isolate Group	グループを分離
+ 	Italian	イタリア語
+ 	Join Tool	結合ツール
+-	Join our Discord	Discord に参加
+-	Join the ArtCraft community on Discord (discord.gg/artcraft)	Discord で ArtCraft コミュニティに参加 (discord.gg/artcraft)
+ 	Join the lines of each paragraph	段落内の行を連結
+ 	Justification…	文字組み…
+ 	Keep Formatting	書式を保持
+@@ -3468,7 +3462,6 @@ gradient-kind	Radial	円形
+ 	Default Printer	デフォルトのプリンター
+ 	Delete these {n} graphic styles?	これら {n} 個のグラフィックスタイルを削除しますか？
+ 	Delete this {n} graphic style?	この {n} 個のグラフィックスタイルを削除しますか？
+-	Discord	Discord
+ 	Do Not Move	移動しない
+ 	Document Swatches	ドキュメントのスウォッチ
+ 	Document profile	ドキュメントプロファイル
+@@ -3636,7 +3629,7 @@ file-filter	Templates	テンプレート
+ @plural	Packaged {n} file {note} in {folder}|Packaged {n} files {note} in {folder}	{folder} に {n} 個のファイルをパッケージしました{note}
+ 	Page information	ページ情報
+ 	Paragraph Style	段落スタイル
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	ArtCraft の一員。MIT OR Apache-2.0。フォント：Source Sans 3、Inter、JetBrains Mono (OFL)。アイコン：Lucide (ISC) + VectorCraft。
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0。フォント：Source Sans 3、Inter、JetBrains Mono (OFL)。アイコン：Lucide (ISC) + VectorCraft。
+ 	Perspective grid presets	遠近グリッドプリセット
+ 	Phone 390×844	スマートフォン 390×844
+ 	Place onto a new locked, dimmed template layer below the current layer	現在のレイヤーの下に、ロックされ淡色表示の新規テンプレートレイヤーとして配置
+diff --git a/crates/ui-egui/src/i18n/ka.tsv b/crates/ui-egui/src/i18n/ka.tsv
+index 1a01580..7ae7efe 100644
+--- a/crates/ui-egui/src/i18n/ka.tsv
++++ b/crates/ui-egui/src/i18n/ka.tsv
+@@ -19,7 +19,6 @@
+ 	About VectorCraft	VectorCraft-ის შესახებ
+ 	Align to Path	ტრაექტორიაზე სწორება
+ 	Cut Path at Selected Anchor Points	ტრაექტორიის გაჭრა მონიშნულ საყრდენ წერტილებზე
+-	Join Our Discord	შემოგვიერთდით Discord-ზე
+ 	Language	ენა
+ 	UI Brightness	ინტერფეისის სიკაშკაშე
+ 	Dark	ბნელი
+@@ -635,8 +634,6 @@
+ 	Save Swatch Library…	ფერის ნიმუშების ბიბლიოთეკის შენახვა…
+ 	Symbol Libraries	სიმბოლოების ბიბლიოთეკები
+ 	Help	დახმარება
+-	ArtCraft Website	ArtCraft-ის ვებსაიტი
+-	VectorCraft on getartcraft.com	VectorCraft getartcraft.com-ზე
+ 	VectorCraft on GitHub	VectorCraft GitHub-ზე
+ 	Search Commands…	ბრძანებების ძიება…
+ 	VectorCraft Help…	VectorCraft-ის დახმარება…
+@@ -1807,7 +1804,7 @@ digits	Malayalam	მალაიალამური
+ 	Select All Bound Objects	ყველა დაკავშირებული ობიექტის მონიშვნა
+ 	Multiple objects	რამდენიმე ობიექტი
+ 	Graphics: {adapter}	გრაფიკა: {adapter}
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	ArtCraft-ის ნაწილი. MIT OR Apache-2.0. შრიფტები: Source Sans 3, Inter, JetBrains Mono (OFL). ხატულები: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. შრიფტები: Source Sans 3, Inter, JetBrains Mono (OFL). ხატულები: Lucide (ISC) + VectorCraft.
+ 	Version {version} — open-source vector illustration in pure Rust.	ვერსია {version} — ღია კოდის ვექტორული ილუსტრაცია სუფთა Rust-ზე.
+ 	Align to Page	გვერდზე სწორება
+ 	Smooth Color	ფერის გლუვი გადასვლა
+@@ -3439,10 +3436,6 @@ effect	Regular	ჩვეულებრივი
+ 	Recent Files	ბოლოს გახსნილი ფაილები
+ 	Vector illustration — fast, open, scriptable.	ვექტორული ილუსტრაცია — სწრაფი, ღია, სკრიპტებით მართვადი.
+ 	Welcome to VectorCraft	კეთილი იყოს თქვენი მობრძანება VectorCraft-ში
+-	ArtCraft website	ArtCraft-ის ვებსაიტი
+-	Discord	Discord
+-	Join our Discord	შემოგვიერთდით Discord-ზე
+-	Join the ArtCraft community on Discord (discord.gg/artcraft)	შემოუერთდით ArtCraft-ის საზოგადოებას Discord-ზე (discord.gg/artcraft)
+ 	Source code on GitHub	საწყისი კოდი GitHub-ზე
+ 	All Tools	ყველა ხელსაწყო
+ 	Draw	ხატვა
+diff --git a/crates/ui-egui/src/i18n/ko.tsv b/crates/ui-egui/src/i18n/ko.tsv
+index 5f24419..2ca382b 100644
+--- a/crates/ui-egui/src/i18n/ko.tsv
++++ b/crates/ui-egui/src/i18n/ko.tsv
+@@ -61,7 +61,6 @@ digits	Malayalam	말라얄람어
+ 	Favorites	즐겨찾기
+ 	Flip	뒤집기
+ 	Japanese	일본어
+-	Join Our Discord	Discord 참여하기
+ 	Line-end Punctuation Half Width	줄 끝 문장 부호 반각
+ 	Insert Kashidas	카시다 삽입
+ 	Long	길게
+@@ -768,8 +767,6 @@ digits	Malayalam	말라얄람어
+ 	Save Swatch Library…	견본 라이브러리 저장…
+ 	Symbol Libraries	심볼 라이브러리
+ 	Help	도움말
+-	ArtCraft Website	ArtCraft 웹사이트
+-	VectorCraft on getartcraft.com	getartcraft.com의 VectorCraft
+ 	VectorCraft on GitHub	GitHub의 VectorCraft
+ 	Search Commands…	명령 검색…
+ 	VectorCraft Help…	VectorCraft 도움말…
+@@ -979,7 +976,6 @@ digits	Malayalam	말라얄람어
+ 	Arrange: Bring to Front	배열: 맨 앞으로 가져오기
+ 	Arrowheads:	화살촉:
+ 	Art using a deleted global swatch keeps its colour.	삭제된 글로벌 견본을 사용한 아트워크는 색상을 유지합니다.
+-	ArtCraft website	ArtCraft 웹사이트
+ 	Artboard Options	아트보드 옵션
+ 	Artboard Options…	아트보드 옵션…
+ 	Artboard Tool	아트보드 도구
+@@ -1948,8 +1944,6 @@ digits	Malayalam	말라얄람어
+ 	Isolate Group	그룹 격리
+ 	Italian	이탈리아어
+ 	Join Tool	결합 도구
+-	Join our Discord	Discord 참여하기
+-	Join the ArtCraft community on Discord (discord.gg/artcraft)	Discord에서 ArtCraft 커뮤니티에 참여하세요 (discord.gg/artcraft)
+ 	Join the lines of each paragraph	각 단락의 줄 결합
+ 	Justification…	양끝 맞춤…
+ 	Keep Formatting	서식 유지
+@@ -3456,7 +3450,6 @@ gradient-kind	Radial	방사형
+ 	Default Printer	기본 프린터
+ 	Delete these {n} graphic styles?	그래픽 스타일 {n}개를 삭제하시겠습니까?
+ 	Delete this {n} graphic style?	그래픽 스타일 {n}개를 삭제하시겠습니까?
+-	Discord	Discord
+ 	Do Not Move	이동 안 함
+ 	Document Swatches	문서 견본
+ 	Document profile	문서 프로파일
+@@ -3624,7 +3617,7 @@ file-filter	Templates	템플릿
+ @plural	Packaged {n} file {note} in {folder}|Packaged {n} files {note} in {folder}	{folder}에 파일 {n}개를 패키지했습니다 {note}
+ 	Page information	페이지 정보
+ 	Paragraph Style	단락 스타일
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	ArtCraft의 일부입니다. MIT OR Apache-2.0. 글꼴: Source Sans 3, Inter, JetBrains Mono (OFL). 아이콘: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. 글꼴: Source Sans 3, Inter, JetBrains Mono (OFL). 아이콘: Lucide (ISC) + VectorCraft.
+ 	Perspective grid presets	원근 격자 프리셋
+ 	Phone 390×844	휴대폰 390×844
+ 	Place onto a new locked, dimmed template layer below the current layer	현재 레이어 아래의 잠기고 흐리게 처리된 새 템플릿 레이어에 배치
+diff --git a/crates/ui-egui/src/i18n/nl.tsv b/crates/ui-egui/src/i18n/nl.tsv
+index d7ccca2..d4f68af 100644
+--- a/crates/ui-egui/src/i18n/nl.tsv
++++ b/crates/ui-egui/src/i18n/nl.tsv
+@@ -12,7 +12,6 @@
+ 	About VectorCraft	Over VectorCraft
+ 	Align to Path	Uitlijnen op pad
+ 	Cut Path at Selected Anchor Points	Pad knippen op geselecteerde ankerpunten
+-	Join Our Discord	Word lid van onze Discord
+ 	Language	Taal
+ 	UI Brightness	UI-helderheid
+ 	Dark	Donker
+@@ -707,8 +706,6 @@
+ 	Save Swatch Library…	Staalenbibliotheek opslaan…
+ 	Symbol Libraries	Symboolbibliotheken
+ 	Help	Help
+-	ArtCraft Website	ArtCraft-website
+-	VectorCraft on getartcraft.com	VectorCraft op getartcraft.com
+ 	VectorCraft on GitHub	VectorCraft op GitHub
+ 	Search Commands…	Opdrachten zoeken…
+ 	VectorCraft Help…	VectorCraft-help…
+@@ -1920,8 +1917,8 @@ digits	Malayalam	Malayalam
+ 	Select All Bound Objects	Alle gekoppelde objecten selecteren
+ 	Multiple objects	Meerdere objecten
+ 	Graphics: {adapter}	Grafisch: {adapter}
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	Onderdeel van ArtCraft. MIT OR Apache-2.0. Lettertypen: Source Sans 3, Inter, JetBrains Mono (OFL). Pictogrammen: Lucide (ISC) + VectorCraft.
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	Onderdeel van ArtCraft. MIT OR Apache-2.0. Lettertypen: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Pictogrammen: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. Lettertypen: Source Sans 3, Inter, JetBrains Mono (OFL). Pictogrammen: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. Lettertypen: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Pictogrammen: Lucide (ISC) + VectorCraft.
+ 	Version {version} — open-source vector illustration in pure Rust.	Versie {version} — open-source vectorillustratie in pure Rust.
+ 	Align to Page	Uitlijnen op pagina
+ 	Smooth Color	Vloeiende kleur
+@@ -3670,10 +3667,6 @@ effect	Regular	Regelmatig
+ 	Recent Files	Recente bestanden
+ 	Vector illustration — fast, open, scriptable.	Vectorillustratie — snel, open, scriptbaar.
+ 	Welcome to VectorCraft	Welkom bij VectorCraft
+-	ArtCraft website	Website van ArtCraft
+-	Discord	Discord
+-	Join our Discord	Word lid van onze Discord
+-	Join the ArtCraft community on Discord (discord.gg/artcraft)	Word lid van de ArtCraft-community op Discord (discord.gg/artcraft)
+ 	Source code on GitHub	Broncode op GitHub
+ 	All Tools	Alle gereedschappen
+ 	Draw	Tekenen
+diff --git a/crates/ui-egui/src/i18n/pl.tsv b/crates/ui-egui/src/i18n/pl.tsv
+index be0a2a2..428f6d7 100644
+--- a/crates/ui-egui/src/i18n/pl.tsv
++++ b/crates/ui-egui/src/i18n/pl.tsv
+@@ -30,7 +30,6 @@
+ 	About VectorCraft	O programie VectorCraft
+ 	Align to Path	Wyrównaj do ścieżki
+ 	Cut Path at Selected Anchor Points	Rozetnij ścieżkę w zaznaczonych punktach kontrolnych
+-	Join Our Discord	Dołącz do naszego Discorda
+ 	Language	Język
+ 	UI Brightness	Jasność interfejsu
+ 	Dark	Ciemny
+@@ -704,8 +703,6 @@
+ 	Save Swatch Library…	Zapisz bibliotekę próbek…
+ 	Symbol Libraries	Biblioteki symboli
+ 	Help	Pomoc
+-	ArtCraft Website	Strona ArtCraft
+-	VectorCraft on getartcraft.com	VectorCraft w getartcraft.com
+ 	VectorCraft on GitHub	VectorCraft w serwisie GitHub
+ 	Search Commands…	Szukaj poleceń…
+ 	VectorCraft Help…	Pomoc VectorCraft…
+@@ -2021,7 +2018,7 @@ digits	Malayalam	Malajalam
+ 	Select All Bound Objects	Zaznacz wszystkie powiązane obiekty
+ 	Multiple objects	Wiele obiektów
+ 	Graphics: {adapter}	Grafika: {adapter}
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	Część ArtCraft. MIT LUB Apache-2.0. Czcionki: Source Sans 3, Inter, JetBrains Mono (OFL). Ikony: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT LUB Apache-2.0. Czcionki: Source Sans 3, Inter, JetBrains Mono (OFL). Ikony: Lucide (ISC) + VectorCraft.
+ 	Version {version} — open-source vector illustration in pure Rust.	Wersja {version} — otwartoźródłowa grafika wektorowa w czystym Ruście.
+ 	Align to Page	Wyrównaj do strony
+ 	Smooth Color	Gładki kolor
+@@ -3776,10 +3773,6 @@ effect	Regular	Normalny
+ 	Recent Files	Ostatnie pliki
+ 	Vector illustration — fast, open, scriptable.	Ilustracja wektorowa — szybka, otwarta, skryptowalna.
+ 	Welcome to VectorCraft	Witamy w VectorCraft
+-	ArtCraft website	Strona ArtCraft
+-	Discord	Discord
+-	Join our Discord	Dołącz do naszego Discorda
+-	Join the ArtCraft community on Discord (discord.gg/artcraft)	Dołącz do społeczności ArtCraft na Discordzie (discord.gg/artcraft)
+ 	Source code on GitHub	Kod źródłowy w serwisie GitHub
+ 	All Tools	Wszystkie narzędzia
+ 	Draw	Rysuj
+diff --git a/crates/ui-egui/src/i18n/pt-br.tsv b/crates/ui-egui/src/i18n/pt-br.tsv
+index 2f07e53..0e994c2 100644
+--- a/crates/ui-egui/src/i18n/pt-br.tsv
++++ b/crates/ui-egui/src/i18n/pt-br.tsv
+@@ -15,7 +15,7 @@
+ # pincel, amostra, prancheta ...), following common desktop-software conventions (commands
+ # in the infinitive, menus as nouns); no proprietary localisation resource, string table or product
+ # UI was consulted or copied; add entries the same way. Product and technology names (VectorCraft,
+-# ArtCraft, SVG, OpenType, CMYK, Lab ...) stay in Latin letters; the trailing "…" of dialog
++# SVG, OpenType, CMYK, Lab ...) stay in Latin letters; the trailing "…" of dialog
+ # commands is kept.
+ #
+ # Coverage: the whole interface (every menu string and every `tl!` literal, `complete_menus`,
+@@ -229,8 +229,6 @@
+ 	Arrange: Bring to Front	Organizar: Trazer para Frente
+ 	Arrowheads:	Pontas de Seta:
+ 	Art using a deleted global swatch keeps its colour.	A arte que usa uma amostra global excluída mantém sua cor.
+-	ArtCraft Website	Site do ArtCraft
+-	ArtCraft website	Site do ArtCraft
+ 	Artboard Options	Opções de Mesa de Trabalho
+ 	Artboard Options…	Opções de Mesa de Trabalho…
+ 	Artboard Tool	Ferramenta Mesa de Trabalho
+@@ -1427,10 +1425,7 @@
+ 	Isolate Selected Object	Isolar Objeto Selecionado
+ 	Italian	Italiano
+ 	Join	Unir
+-	Join Our Discord	Junte-se ao nosso Discord
+ 	Join Tool	Ferramenta Unir
+-	Join our Discord	Junte-se ao nosso Discord
+-	Join the ArtCraft community on Discord (discord.gg/artcraft)	Junte-se à comunidade do ArtCraft no Discord (discord.gg/artcraft)
+ 	Join the lines of each paragraph	Junte as linhas de cada parágrafo
+ 	Justification…	Justificação…
+ 	Keep Formatting	Manter Formatação
+@@ -2995,7 +2990,6 @@ digits	Malayalam	Malaiala
+ 	VectorCraft Help…	Ajuda do VectorCraft…
+ 	VectorCraft didn't quit normally last time. These documents had unsaved changes:	O VectorCraft não fechou normalmente da última vez. Estes documentos tinham alterações não salvas:
+ 	VectorCraft on GitHub	VectorCraft no GitHub
+-	VectorCraft on getartcraft.com	VectorCraft em getartcraft.com
+ 	Vectors	Vetores
+ 	Version {version} — open-source vector illustration in pure Rust.	Versão {version} — ilustração vetorial de código aberto em Rust puro.
+ 	Version:	Versão:
+@@ -4484,7 +4478,6 @@ axis	Both	Ambos
+ 	Delete Layer	Excluir Camada
+ 	Delete these {n} graphic styles?	Excluir estes {n} estilos gráficos?
+ 	Delete this {n} graphic style?	Excluir este {n} estilo gráfico?
+-	Discord	Discord
+ 	Do Not Move	Não Mover
+ 	Document profile	Perfil do documento
+ 	Document Swatches	Amostras do Documento
+@@ -4685,7 +4678,7 @@ axis	Both	Ambos
+ @plural	Packaged {n} file {note} in {folder}|Packaged {n} files {note} in {folder}	{n} arquivo empacotado em {folder} {note}|{n} arquivos empacotados em {folder} {note}
+ 	Page information	Informações da página
+ 	Paragraph Style	Estilo de Parágrafo
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	Parte do ArtCraft. MIT OR Apache-2.0. Fontes: Source Sans 3, Inter, JetBrains Mono (OFL). Ícones: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. Fontes: Source Sans 3, Inter, JetBrains Mono (OFL). Ícones: Lucide (ISC) + VectorCraft.
+ 	Perspective grid presets	Predefinidos de grade de perspectiva
+ 	Phone 390×844	Celular 390×844
+ 	Place onto a new locked, dimmed template layer below the current layer	Colocar em uma nova camada de modelo bloqueada e esmaecida abaixo da camada atual
+@@ -6227,7 +6220,7 @@ shape	Open	Aberta
+ swatch	Orange	Laranja
+ swatch	Orange Red	Vermelho-alaranjado
+ 	Overlay Edge	Sobreposição de bordas
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	Parte do ArtCraft. MIT OR Apache-2.0. Fontes: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Ícones: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. Fontes: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Ícones: Lucide (ISC) + VectorCraft.
+ 	Path Length	Comprimento do caminho
+ 	PDF/X-1a:2001	PDF/X-1a:2001
+ 	PDF/X-3:2002	PDF/X-3:2002
+diff --git a/crates/ui-egui/src/i18n/ru.tsv b/crates/ui-egui/src/i18n/ru.tsv
+index cb6cbd1..3d72f86 100644
+--- a/crates/ui-egui/src/i18n/ru.tsv
++++ b/crates/ui-egui/src/i18n/ru.tsv
+@@ -239,8 +239,6 @@ font-technology	Variable	Вариативные
+ 	Artboard {number}	Монтажная область {number}
+ 	Artboard:	Монтажная область:
+ 	Artboards	Монтажные области
+-	ArtCraft Website	Веб-сайт ArtCraft
+-	ArtCraft website	Веб-сайт ArtCraft
+ 	Artwork Colors	Цвета рисунка
+ 	As Multiple Assets	Как несколько ресурсов
+ 	As Single Asset	Как один ресурс
+@@ -794,7 +792,6 @@ font-technology	Variable	Вариативные
+ 	Discard Empty Type	Отменить пустой текст
+ 	Discard Recovered Documents	Отменить восстановленные документы
+ 	Discard White Overprint in Output	Отменить наложение белого при выводе
+-	Discord	Discord
+ 	Discretionary Hyphen	Мягкий перенос
+ 	Discretionary Ligatures	Дискреционные лигатуры
+ 	Display All Blacks Accurately	Отображать все чёрные точно
+@@ -1656,9 +1653,6 @@ file-filter	Templates	Шаблоны
+ 	Italian	Итальянский
+ 	Japanese	Японский
+ 	Join	Соединить
+-	Join Our Discord	Присоединяйтесь к нашему Discord
+-	Join our Discord	Присоединяйтесь к нашему Discord
+-	Join the ArtCraft community on Discord (discord.gg/artcraft)	Присоединяйтесь к сообществу ArtCraft в Discord (discord.gg/artcraft)
+ 	Join the lines of each paragraph	Соединять строки каждого абзаца
+ 	Join Tool	Инструмент «Соединение»
+ 	Justification…	Выключка…
+@@ -2344,7 +2338,7 @@ file-filter	Templates	Шаблоны
+ 	Paragraph Style Options	Параметры стиля абзаца
+ 	Paragraph Styles	Стили абзацев
+ 	Paragraph Symbol	Символ абзаца
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	Часть ArtCraft. MIT OR Apache-2.0. Шрифты: Source Sans 3, Inter, JetBrains Mono (OFL). Значки: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. Шрифты: Source Sans 3, Inter, JetBrains Mono (OFL). Значки: Lucide (ISC) + VectorCraft.
+ 	Password	Пароль
+ 	Paste	Вставить
+ 	Paste in Back	Вставить позади
+@@ -3684,7 +3678,6 @@ digits	Malayalam	Малаялам
+ 	Vector illustration — fast, open, scriptable.	Векторная иллюстрация — быстрая, открытая, программируемая.
+ 	VectorCraft didn't quit normally last time. These documents had unsaved changes:	VectorCraft не завершился нормально в прошлый раз. В этих документах были несохранённые изменения:
+ 	VectorCraft Help…	Справка VectorCraft…
+-	VectorCraft on getartcraft.com	VectorCraft на getartcraft.com
+ 	VectorCraft on GitHub	VectorCraft на GitHub
+ 	Vectors	Векторы
+ 	Version {version} — open-source vector illustration in pure Rust.	Версия {version} — векторная иллюстрация с открытым исходным кодом на чистом Rust.
+diff --git a/crates/ui-egui/src/i18n/sv.tsv b/crates/ui-egui/src/i18n/sv.tsv
+index b8cc549..7f685ab 100644
+--- a/crates/ui-egui/src/i18n/sv.tsv
++++ b/crates/ui-egui/src/i18n/sv.tsv
+@@ -230,8 +230,6 @@ font-technology	Variable	Variabla
+ 	Artboard {number}	Rityta {number}
+ 	Artboard:	Rityta:
+ 	Artboards	Ritytor
+-	ArtCraft Website	ArtCrafts webbplats
+-	ArtCraft website	ArtCrafts webbplats
+ 	Artwork Colors	Färger i grafiken
+ 	As Multiple Assets	Som flera resurser
+ 	As Single Asset	Som en enda resurs
+@@ -783,7 +781,6 @@ font-technology	Variable	Variabla
+ 	Discard Empty Type	Släng tom text
+ 	Discard Recovered Documents	Släng återställda dokument
+ 	Discard White Overprint in Output	Släng vit övertryckning i utdata
+-	Discord	Discord
+ 	Discretionary Hyphen	Mjukt bindestreck
+ 	Discretionary Ligatures	Valfria ligaturer
+ 	Display All Blacks Accurately	Visa alla svarta korrekt
+@@ -1588,9 +1585,6 @@ font-technology	Variable	Variabla
+ 	Italian	Italienska
+ 	Japanese	Japanska
+ 	Join	Foga samman
+-	Join Our Discord	Gå med i vår Discord
+-	Join our Discord	Gå med i vår Discord
+-	Join the ArtCraft community on Discord (discord.gg/artcraft)	Gå med i ArtCraft-gemenskapen på Discord (discord.gg/artcraft)
+ 	Join the lines of each paragraph	Foga samman raderna i varje stycke
+ 	Join Tool	Sammanfogningsverktyg
+ 	Justification…	Justering…
+@@ -2258,7 +2252,7 @@ font-technology	Variable	Variabla
+ 	Paragraph Style Options	Alternativ för styckestil
+ 	Paragraph Styles	Styckestilar
+ 	Paragraph Symbol	Styckesymbol
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	Del av ArtCraft. MIT OR Apache-2.0. Typsnitt: Source Sans 3, Inter, JetBrains Mono (OFL). Ikoner: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. Typsnitt: Source Sans 3, Inter, JetBrains Mono (OFL). Ikoner: Lucide (ISC) + VectorCraft.
+ 	Password	Lösenord
+ 	Paste	Klistra in
+ 	Paste in Back	Klistra in bakom
+@@ -3574,7 +3568,6 @@ digits	Malayalam	Malayalam
+ 	Vector illustration — fast, open, scriptable.	Vektorillustration – snabb, öppen, skriptbar.
+ 	VectorCraft didn't quit normally last time. These documents had unsaved changes:	VectorCraft avslutades inte normalt förra gången. De här dokumenten hade osparade ändringar:
+ 	VectorCraft Help…	VectorCraft-hjälp…
+-	VectorCraft on getartcraft.com	VectorCraft på getartcraft.com
+ 	VectorCraft on GitHub	VectorCraft på GitHub
+ 	Vectors	Vektorer
+ 	Version {version} — open-source vector illustration in pure Rust.	Version {version} – vektorillustration med öppen källkod i ren Rust.
+@@ -5111,7 +5104,7 @@ lighting	Light	Ljus
+ 	PDF/X-4:2010	PDF/X-4:2010
+ 	PRs	PR:er
+ 	Page Cover 1640×624	Sidomslag 1640×624
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	Del av ArtCraft. MIT OR Apache-2.0. Typsnitt: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Ikoner: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. Typsnitt: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Ikoner: Lucide (ISC) + VectorCraft.
+ 	Pattern Swatches	Mönsterfärgrutor
+ 	Pen	Penna
+ 	Pentagram	Pentagram
+diff --git a/crates/ui-egui/src/i18n/tr.tsv b/crates/ui-egui/src/i18n/tr.tsv
+index 9009af8..26fafa5 100644
+--- a/crates/ui-egui/src/i18n/tr.tsv
++++ b/crates/ui-egui/src/i18n/tr.tsv
+@@ -226,8 +226,6 @@ font-technology	Variable	Değişken
+ 	Artboard {number}	Çalışma yüzeyi {number}
+ 	Artboard:	Çalışma yüzeyi:
+ 	Artboards	Çalışma Yüzeyleri
+-	ArtCraft Website	ArtCraft Web Sitesi
+-	ArtCraft website	ArtCraft web sitesi
+ 	Artwork Colors	Sanat Eseri Renkleri
+ 	As Multiple Assets	Çoklu Varlıklar Olarak
+ 	As Single Asset	Tek Varlık Olarak
+@@ -775,7 +773,6 @@ font-technology	Variable	Değişken
+ 	Discard Empty Type	Boş Türü At
+ 	Discard Recovered Documents	Kurtarılan Belgeleri Atın
+ 	Discard White Overprint in Output	Çıktıdaki Beyaz Üst Baskıyı At
+-	Discord	Discord
+ 	Discretionary Hyphen	İsteğe Bağlı Kısa Çizgi
+ 	Discretionary Ligatures	İsteğe Bağlı Bitişik Harfler
+ 	Display All Blacks Accurately	Tüm Siyahları Doğru Şekilde Görüntüleyin
+@@ -1470,9 +1467,6 @@ font-technology	Variable	Değişken
+ 	Italian	İtalyan
+ 	Japanese	Japonca
+ 	Join	Katıl
+-	Join Our Discord	Discord'umuza Katılın
+-	Join our Discord	Discord'umuza katılın
+-	Join the ArtCraft community on Discord (discord.gg/artcraft)	Discord'daki ArtCraft topluluğuna katılın (discord.gg/artcraft)
+ 	Join the lines of each paragraph	Her paragrafın satırlarını birleştirin
+ 	Join Tool	Birleştirme Aracı
+ 	Justification…	İki Yana Yaslama…
+@@ -2132,7 +2126,7 @@ shape	Open	Açık
+ 	Paragraph Style Options	Paragraf Stili Seçenekleri
+ 	Paragraph Styles	Paragraf Stilleri
+ 	Paragraph Symbol	Paragraf Sembolü
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	ArtCraft'ın bir parçası. MIT VEYA Apache-2.0. Yazı Tipleri: Source Sans 3, Inter, JetBrains Mono (OFL). Simgeler: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT VEYA Apache-2.0. Yazı Tipleri: Source Sans 3, Inter, JetBrains Mono (OFL). Simgeler: Lucide (ISC) + VectorCraft.
+ 	Password	Şifre
+ 	Paste	Yapıştır
+ 	Paste in Back	Arkaya Yapıştır
+@@ -3463,7 +3457,6 @@ digits	Malayalam	Malayalam
+ 	Vector illustration — fast, open, scriptable.	Vektör illüstrasyonu — hızlı, açık, yazılabilir.
+ 	VectorCraft didn't quit normally last time. These documents had unsaved changes:	VectorCraft geçen sefer normal şekilde kapanmamıştı. Bu belgelerde kaydedilmemiş değişiklikler vardı:
+ 	VectorCraft Help…	VectorCraft Yardımı…
+-	VectorCraft on getartcraft.com	Getartcraft.com'da VectorCraft
+ 	VectorCraft on GitHub	GitHub'da VectorCraft
+ 	Vectors	Vektörler
+ 	Version {version} — open-source vector illustration in pure Rust.	Sürüm {version} — saf Rust'ta açık kaynaklı vektör çizimi.
+@@ -4909,7 +4902,7 @@ lighting	Light	Işık
+ 	PDF/X-4:2010	PDF/X-4:2010
+ 	PRs	PR'ler
+ 	Page Cover 1640×624	Sayfa Kapağı 1640×624
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	ArtCraft'ın bir parçası. MIT VEYA Apache-2.0. Yazı Tipleri: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Simgeler: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT VEYA Apache-2.0. Yazı Tipleri: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Simgeler: Lucide (ISC) + VectorCraft.
+ 	Pattern Swatches	Desen Örnekleri
+ 	Pen	Kalem
+ 	Pentagram	Pentagram
+diff --git a/crates/ui-egui/src/i18n/uk.tsv b/crates/ui-egui/src/i18n/uk.tsv
+index 7535b53..c0eb9aa 100644
+--- a/crates/ui-egui/src/i18n/uk.tsv
++++ b/crates/ui-egui/src/i18n/uk.tsv
+@@ -235,8 +235,6 @@ font-technology	Variable	Варіативні
+ 	Artboard {number}	Монтажна область {number}
+ 	Artboard:	Монтажна область:
+ 	Artboards	Монтажні області
+-	ArtCraft Website	Веб-сайт ArtCraft
+-	ArtCraft website	Веб-сайт ArtCraft
+ 	Artwork Colors	Кольори малюнка
+ 	As Multiple Assets	Як кілька ресурсів
+ 	As Single Asset	Як один ресурс
+@@ -790,7 +788,6 @@ font-technology	Variable	Варіативні
+ 	Discard Empty Type	Видалити порожній текст
+ 	Discard Recovered Documents	Відкинути відновлені документи
+ 	Discard White Overprint in Output	Скасувати накладення білого під час виведення
+-	Discord	Discord
+ 	Discretionary Hyphen	М’яке перенесення
+ 	Discretionary Ligatures	Дискреційні лігатури
+ 	Display All Blacks Accurately	Відображати всі чорні точно
+@@ -1653,9 +1650,6 @@ file-filter	Templates	Шаблони
+ 	Italian	Італійська
+ 	Japanese	Японська
+ 	Join	З’єднати
+-	Join Our Discord	Приєднуйтесь до нашого Discord
+-	Join our Discord	Приєднуйтесь до нашого Discord
+-	Join the ArtCraft community on Discord (discord.gg/artcraft)	Приєднуйтесь до спільноти ArtCraft Discord (discord.gg/artcraft)
+ 	Join the lines of each paragraph	Поєднувати рядки кожного абзацу
+ 	Join Tool	Інструмент «З’єднання»
+ 	Justification…	Вирівнювання за шириною…
+@@ -2341,7 +2335,7 @@ file-filter	Templates	Шаблони
+ 	Paragraph Style Options	Параметри стилю абзацу
+ 	Paragraph Styles	Стилі абзаців
+ 	Paragraph Symbol	Символ абзацу
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	Частина ArtCraft. MIT OR Apache-2.0. Шрифти: Source Sans 3, Inter, JetBrains Mono (OFL). Значки: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. Шрифти: Source Sans 3, Inter, JetBrains Mono (OFL). Значки: Lucide (ISC) + VectorCraft.
+ 	Password	Пароль
+ 	Paste	Вставити
+ 	Paste in Back	Вставити позаду
+@@ -3682,7 +3676,6 @@ effect	Points	Точки
+ 	Vector illustration — fast, open, scriptable.	Векторне малювання — швидке, відкрите, кероване сценаріями.
+ 	VectorCraft didn't quit normally last time. These documents had unsaved changes:	VectorCraft не завершився нормально минулого разу. У цих документах були незбережені зміни:
+ 	VectorCraft Help…	Довідка VectorCraft…
+-	VectorCraft on getartcraft.com	VectorCraft на getartcraft.com
+ 	VectorCraft on GitHub	VectorCraft на GitHub
+ 	Vectors	Вектори
+ 	Version {version} — open-source vector illustration in pure Rust.	Версія {version} — векторне малювання з відкритим кодом, написане на Rust.
+diff --git a/crates/ui-egui/src/i18n/vi.tsv b/crates/ui-egui/src/i18n/vi.tsv
+index 07852ac..4b26f15 100644
+--- a/crates/ui-egui/src/i18n/vi.tsv
++++ b/crates/ui-egui/src/i18n/vi.tsv
+@@ -267,8 +267,6 @@ font-technology	Variable	Biến thiên
+ 	Artboard:	Bảng vẽ:
+ 	Artboards	Các bảng vẽ
+ 	Artboards: {n}	Bảng vẽ: {n}
+-	ArtCraft Website	Trang web ArtCraft
+-	ArtCraft website	Trang web ArtCraft
+ 	Artistic	Nghệ thuật
+ 	Artwork Colors	Màu sắc tác phẩm
+ 	As Multiple Assets	Thành nhiều asset
+@@ -928,7 +926,6 @@ font-technology	Variable	Biến thiên
+ 	Discard Empty Type	Loại bỏ chữ trống
+ 	Discard Recovered Documents	Loại bỏ tài liệu đã phục hồi
+ 	Discard White Overprint in Output	Loại bỏ in chồng màu trắng khi xuất
+-	Discord	Discord
+ 	Discretionary Hyphen	Gạch nối tùy chọn
+ 	Discretionary Ligatures	Chữ ghép tùy chọn
+ 	Display All Blacks Accurately	Hiển thị tất cả màu đen chính xác
+@@ -1939,9 +1936,6 @@ digits	Hindi	Hindi
+ 	Its graphics, colors and text styles are deleted from this machine.	Đồ họa, màu sắc và kiểu văn bản của nó sẽ bị xóa khỏi máy này.
+ 	Japanese	Tiếng Nhật
+ 	Join	Nối
+-	Join Our Discord	Tham gia Discord
+-	Join our Discord	Tham gia Discord của chúng tôi
+-	Join the ArtCraft community on Discord (discord.gg/artcraft)	Tham gia cộng đồng ArtCraft trên Discord (discord.gg/artcraft)
+ 	Join the lines of each paragraph	Nối các dòng trong mỗi đoạn văn
+ 	Join Tool	Công cụ Nối
+ 	Joins	Kiểu nối
+@@ -2623,7 +2617,7 @@ digits	Hindi	Hindi
+ 	Paragraph Style Options	Tùy chọn kiểu đoạn văn
+ 	Paragraph Styles	Kiểu đoạn văn
+ 	Paragraph Symbol	Ký hiệu đoạn văn
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	Một phần của ArtCraft. MIT OR Apache-2.0. Phông chữ: Source Sans 3, Inter, JetBrains Mono (OFL). Biểu tượng: Lucide (ISC) + VectorCraft.
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0. Phông chữ: Source Sans 3, Inter, JetBrains Mono (OFL). Biểu tượng: Lucide (ISC) + VectorCraft.
+ 	Password	Mật khẩu
+ 	Paste	Dán
+ 	Paste Design	Dán thiết kế
+@@ -4032,7 +4026,6 @@ mark-style	Japanese	Kiểu Nhật
+ 	VectorCraft didn't quit normally last time. These documents had unsaved changes:	VectorCraft không thoát bình thường lần trước. Các tài liệu này có thay đổi chưa lưu:
+ 	VectorCraft documents: one locked object, updated when the file changes.	Tài liệu VectorCraft: một đối tượng bị khóa, cập nhật khi tệp thay đổi.
+ 	VectorCraft Help…	Trợ giúp VectorCraft…
+-	VectorCraft on getartcraft.com	VectorCraft trên getartcraft.com
+ 	VectorCraft on GitHub	VectorCraft trên GitHub
+ 	Vectors	Vector
+ 	Version	Phiên bản
+diff --git a/crates/ui-egui/src/i18n/zh-hans.tsv b/crates/ui-egui/src/i18n/zh-hans.tsv
+index d609725..7517174 100644
+--- a/crates/ui-egui/src/i18n/zh-hans.tsv
++++ b/crates/ui-egui/src/i18n/zh-hans.tsv
+@@ -186,8 +186,6 @@
+ 	Artboard {number}	画板 {number}
+ 	Artboard:	画板：
+ 	Artboards	画板
+-	ArtCraft Website	ArtCraft 网站
+-	ArtCraft website	ArtCraft 网站
+ 	Artwork Colors	图稿颜色
+ 	As Multiple Assets	作为多个资源
+ 	As Single Asset	作为单一资源
+@@ -738,7 +736,6 @@
+ 	Discard Empty Type	丢弃空文字
+ 	Discard Recovered Documents	丢弃已恢复的文档
+ 	Discard White Overprint in Output	输出时放弃白色叠印
+-	Discord	Discord
+ 	Discretionary Hyphen	选择性连字号
+ 	Discretionary Ligatures	任意连字
+ 	Display All Blacks Accurately	准确显示所有黑色
+@@ -1584,9 +1581,6 @@ file-filter	Templates	模板
+ 	Isolate Group	隔离编组
+ 	Italian	意大利语
+ 	Join	连接
+-	Join Our Discord	加入 Discord
+-	Join our Discord	加入我们的 Discord
+-	Join the ArtCraft community on Discord (discord.gg/artcraft)	在 Discord 加入 ArtCraft 社区 (discord.gg/artcraft)
+ 	Join the lines of each paragraph	合并每个段落的行
+ 	Join Tool	连接工具
+ 	Justification…	对齐设置…
+@@ -2220,7 +2214,7 @@ file-filter	Templates	模板
+ 	Paragraph Style Options	段落样式选项
+ 	Paragraph Styles	段落样式
+ 	Paragraph Symbol	段落符号
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	ArtCraft 的一部分。MIT OR Apache-2.0。字体：Source Sans 3、Inter、JetBrains Mono (OFL)。图标：Lucide (ISC) + VectorCraft。
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0。字体：Source Sans 3、Inter、JetBrains Mono (OFL)。图标：Lucide (ISC) + VectorCraft。
+ 	Password	口令
+ 	Paste	粘贴
+ 	Paste in Back	贴在后面
+@@ -3533,7 +3527,6 @@ digits	Malayalam	马拉雅拉姆数字
+ 	VectorCraft	VectorCraft
+ 	VectorCraft didn't quit normally last time. These documents had unsaved changes:	VectorCraft 上次未正常退出。以下文档有未存储的更改：
+ 	VectorCraft Help…	VectorCraft 说明…
+-	VectorCraft on getartcraft.com	getartcraft.com 上的 VectorCraft
+ 	VectorCraft on GitHub	GitHub 上的 VectorCraft
+ 	Vectors	矢量
+ 	Version {version} — open-source vector illustration in pure Rust.	版本 {version} — 以纯 Rust 打造的开放原始码矢量插画软件。
+@@ -4668,7 +4661,7 @@ imageTrace	Outline	轮廓
+ 	X:	X：
+ 	Y:	Y：
+ 	Text Displayed in Cell	单元格中显示的文本
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	ArtCraft 的一部分。MIT 或 Apache-2.0 许可。字体：Source Sans 3、Inter、JetBrains Mono、Noto Sans SC (OFL)。图标：Lucide (ISC)+ VectorCraft。
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT 或 Apache-2.0 许可。字体：Source Sans 3、Inter、JetBrains Mono、Noto Sans SC (OFL)。图标：Lucide (ISC)+ VectorCraft。
+ 	RGB	RGB
+ 	Pattern Swatches	图案色板
+ 	Default Graphic Style	默认图形样式
+diff --git a/crates/ui-egui/src/i18n/zh-hant.tsv b/crates/ui-egui/src/i18n/zh-hant.tsv
+index 32dbb3b..bf36ab1 100644
+--- a/crates/ui-egui/src/i18n/zh-hant.tsv
++++ b/crates/ui-egui/src/i18n/zh-hant.tsv
+@@ -12,7 +12,7 @@
+ # Clean-room: every entry was written from the plain meaning of the English label using the
+ # vector-drawing vocabulary in everyday use in Taiwan (錨點, 路徑, 筆畫, 填色, 工作區域, 路徑管理員 ...).
+ # No proprietary localisation resource, string table or product UI was consulted or copied; add
+-# entries the same way. Product and technology names (VectorCraft, ArtCraft, SVG, OpenType, CMYK,
++# entries the same way. Product and technology names (VectorCraft, SVG, OpenType, CMYK,
+ # Lab ...) and paper sizes (Letter, Tabloid) stay in Latin letters; the trailing "…" of dialog
+ # commands is kept. Full-width punctuation (，。：) inside sentences; half-width parentheses and
+ # the " · " separators as in the English. Terms shared with PhotoCraft use the same words as its
+@@ -199,8 +199,6 @@ font-technology	Variable	可變
+ 	Artboard {number}	工作區域 {number}
+ 	Artboard:	工作區域：
+ 	Artboards	工作區域
+-	ArtCraft Website	ArtCraft 網站
+-	ArtCraft website	ArtCraft 網站
+ 	Artwork Colors	圖稿顏色
+ 	As Multiple Assets	作為多個資產
+ 	As Single Asset	作為單一資產
+@@ -758,7 +756,6 @@ font-technology	Variable	可變
+ 	Discard Empty Type	捨棄空白文字
+ 	Discard Recovered Documents	捨棄已復原的文件
+ 	Discard White Overprint in Output	輸出時捨棄白色疊印
+-	Discord	Discord
+ 	Discretionary Hyphen	選擇性連字號
+ 	Discretionary Ligatures	任意連字
+ 	Display All Blacks Accurately	精確顯示所有黑色
+@@ -1623,9 +1620,6 @@ file-filter	Templates	範本
+ 	Italian	義大利文
+ 	Japanese	日文
+ 	Join	連接
+-	Join Our Discord	加入我們的 Discord
+-	Join our Discord	加入我們的 Discord
+-	Join the ArtCraft community on Discord (discord.gg/artcraft)	加入 Discord 上的 ArtCraft 社群 (discord.gg/artcraft)
+ 	Join the lines of each paragraph	合併每個段落的各行
+ 	Join Tool	連接工具
+ 	Justification…	對齊設定…
+@@ -3198,7 +3192,7 @@ file-filter	Templates	範本
+ 	Paragraph Style Options	段落樣式選項
+ 	Paragraph Styles	段落樣式
+ 	Paragraph Symbol	段落符號
+-	Part of ArtCraft. MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	ArtCraft 的一部分。MIT OR Apache-2.0。字體：Source Sans 3、Inter、JetBrains Mono (OFL)。圖示：Lucide (ISC) + VectorCraft。
++	MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.	MIT OR Apache-2.0。字體：Source Sans 3、Inter、JetBrains Mono (OFL)。圖示：Lucide (ISC) + VectorCraft。
+ 	Password	密碼
+ 	Paste	貼上
+ 	Paste in Back	貼至後方
+@@ -4554,7 +4548,6 @@ digits	Malayalam	馬來亞拉姆數字
+ 	VectorCraft	VectorCraft
+ 	VectorCraft didn't quit normally last time. These documents had unsaved changes:	VectorCraft 上次未正常結束。下列文件有未儲存的變更：
+ 	VectorCraft Help…	VectorCraft 說明…
+-	VectorCraft on getartcraft.com	getartcraft.com 上的 VectorCraft
+ 	VectorCraft on GitHub	GitHub 上的 VectorCraft
+ 	Vectors	向量
+ 	Version {version} — open-source vector illustration in pure Rust.	版本 {version} — 以純 Rust 打造的開放原始碼向量插畫軟體。
+diff --git a/crates/ui-egui/src/menus/invoke.rs b/crates/ui-egui/src/menus/invoke.rs
+index 7a3213f..c12915e 100644
+--- a/crates/ui-egui/src/menus/invoke.rs
++++ b/crates/ui-egui/src/menus/invoke.rs
+@@ -147,7 +147,7 @@ pub fn invoke(app: &mut VectorcraftApp, id: &str, p: Value) {
+         return;
+     }
+     // Help links: the command returns the URL; a menu click opens it (agents just get the URL).
+-    if matches!(id, "help.discord" | "help.website" | "help.appPage" | "help.github") {
++    if id == "help.github" {
+         app.open_link(id);
+         return;
+     }
+diff --git a/crates/ui-egui/src/menus/tree.rs b/crates/ui-egui/src/menus/tree.rs
+index 9eabfc6..22d2464 100644
+--- a/crates/ui-egui/src/menus/tree.rs
++++ b/crates/ui-egui/src/menus/tree.rs
+@@ -14,13 +14,13 @@ pub fn menu_tree_named(english_names: bool) -> Vec<(&'static str, Vec<Item>)> {
+     let panel = |label: &'static str, id: &'static str| cp(label, "window.panel", json!({ "panel": id, "toggle": true }));
+     vec![
+         (
+-            // The application menu: About and Discord only. The in-window bar never shows it (File
++            // The application menu: About only. The in-window bar never shows it (File
+             // is first there, as in Illustrator); on macOS `native_menu::mac_layout` composes the
+             // App menu from this entry and the other menus (About from Help, Settings from Edit,
+             // Quit from File, Language and Appearance synthesized). It stays first: `from_tree`
+             // gives the first menu the App role.
+             "VectorCraft",
+-            vec![c("About VectorCraft", "help.about"), c("Join Our Discord", "help.discord")],
++            vec![c("About VectorCraft", "help.about")],
+         ),
+         (
+             "File",
+@@ -692,9 +692,6 @@ pub fn menu_tree_named(english_names: bool) -> Vec<(&'static str, Vec<Item>)> {
+         (
+             "Help",
+             vec![
+-                c("Join Our Discord", "help.discord"),
+-                c("ArtCraft Website", "help.website"),
+-                c("VectorCraft on getartcraft.com", "help.appPage"),
+                 c("VectorCraft on GitHub", "help.github"),
+                 Sep,
+                 c("Search Commands…", "help.commandPalette"),
+diff --git a/crates/ui-egui/src/tests/nativemenu.rs b/crates/ui-egui/src/tests/nativemenu.rs
+index cc6e4b3..0781553 100644
+--- a/crates/ui-egui/src/tests/nativemenu.rs
++++ b/crates/ui-egui/src/tests/nativemenu.rs
+@@ -187,7 +187,7 @@ fn every_in_window_item_is_in_the_mac_menu_bar_once() {
+         assert!(a.contains_key(key) || system.contains(&key.0.as_str()) || synthesized.contains(&key.0.as_str()), "{key:?} isn't an in-window item");
+     }
+     let help = ids(menu(&mac, "Help"));
+-    assert!(help.contains(&"help.discord".to_string()) && !help.contains(&"help.about".to_string()), "{help:?}");
++    assert!(help.contains(&"help.github".to_string()) && !help.contains(&"help.about".to_string()), "{help:?}");
+     let edit = ids(menu(&mac, "Edit"));
+     assert!(!edit.contains(&"edit.preferences".to_string()) && edit.contains(&"edit.keyboardShortcuts".to_string()), "{edit:?}");
+     assert!(ids(menu(&mac, "Window")).contains(&"[Workspace]".to_string()));
+diff --git a/crates/ui-egui/src/titlebar.rs b/crates/ui-egui/src/titlebar.rs
+index 5e151e0..e2dedec 100644
+--- a/crates/ui-egui/src/titlebar.rs
++++ b/crates/ui-egui/src/titlebar.rs
+@@ -287,10 +287,8 @@ mod tests {
+                     assert!(!a.shrink(0.5).intersects(b.shrink(0.5)), "{a:?} overlaps {b:?} at {width}");
+                 }
+             }
+-            // Wide windows show the whole group; narrow ones drop Discord, then the search icon.
+             let texts: Vec<String> = texts(&out).into_iter().map(|(t, _)| t).collect();
+             let has = |s: &str| texts.iter().any(|t| t == s);
+-            assert_eq!(has("Discord"), width > 1000.0, "{width}: {texts:?}");
+             // Search is an icon only (as in PhotoCraft): its label lives in the tooltip.
+             assert!(!has("Search commands and tools"), "{width}: {texts:?}");
+         }

@@ -1,0 +1,1488 @@
+diff --git a/crates/engine/src/shell_commands.rs b/crates/engine/src/shell_commands.rs
+index 3b52c03..3a74c69 100644
+--- a/crates/engine/src/shell_commands.rs
++++ b/crates/engine/src/shell_commands.rs
+@@ -90,9 +90,6 @@ pub const SHELL_COMMANDS: &[(&str, &str, &[&str], Option<&str>)] = &[
+     ("window.theme.softLight", "Soft", &["Window", "Theme", "Light Theme"], None),
+     ("window.theme.system", "Sync with system", &["Window", "Theme"], None),
+     ("edit.search", "Search…", &["Edit"], Some("Cmd+F")),
+-    ("help.discord", "Join the ArtCraft Discord…", &["Help"], None),
+-    ("help.website", "PhotoCraft Website", &["Help"], None),
+-    ("help.artcraftWebsite", "ArtCraft Website", &["Help"], None),
+     ("help.github", "PhotoCraft on GitHub", &["Help"], None),
+     ("help.reportIssue", "Report an Issue…", &["Help"], None),
+     ("help.systemInfo", "System Info…", &["Help"], None),
+diff --git a/crates/ui-egui/src/canvas/start_screen.rs b/crates/ui-egui/src/canvas/start_screen.rs
+index e8b6633..0229079 100644
+--- a/crates/ui-egui/src/canvas/start_screen.rs
++++ b/crates/ui-egui/src/canvas/start_screen.rs
+@@ -79,8 +79,6 @@ pub(super) fn start_screen(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+                 home_recent(app, ui, &recent);
+             }
+             ui.add_space(26.0);
+-            crate::links::discord_button(app, ui, 190.0);
+-            ui.add_space(10.0);
+             crate::links::link_row(app, ui);
+         });
+     });
+diff --git a/crates/ui-egui/src/canvas/tests.rs b/crates/ui-egui/src/canvas/tests.rs
+index 73ef696..63f9f5e 100644
+--- a/crates/ui-egui/src/canvas/tests.rs
++++ b/crates/ui-egui/src/canvas/tests.rs
+@@ -1419,7 +1419,7 @@ fn start_screen_buttons_stay_inside_a_narrow_canvas() {
+         PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::default());
+         h.state_mut().1 = true;
+         h.run_steps(3);
+-        for label in ["New document", "Join us on Discord"] {
++        for label in ["New document", "GitHub"] {
+             for node in h.query_all_by_label_contains(label) {
+                 let r = node.rect();
+                 assert!(r.left() >= 0.0 && r.right() <= width, "`{label}` is clipped in a {width}-point-wide canvas: {r:?}");
+diff --git a/crates/ui-egui/src/dialogs.rs b/crates/ui-egui/src/dialogs.rs
+index fc0c268..3c02855 100644
+--- a/crates/ui-egui/src/dialogs.rs
++++ b/crates/ui-egui/src/dialogs.rs
+@@ -793,9 +793,9 @@ fn about_tab_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, tab: &str) {
+             ui.label(tl!("PhotoCraft — an open-source, native image editor written in Rust."));
+             ui.label(crate::i18n::fmt(tl!("Version {version}"), &[("version", &photocraft_engine::build_info::long_version())]));
+             ui.add_space(12.0);
++            ui.label("Based on PhotoCraft by the ArtCraft team (MIT or Apache-2.0), modified for Hanpan.");
++            ui.add_space(8.0);
+             ui.vertical_centered(|ui| {
+-                crate::links::discord_button(app, ui, 220.0);
+-                ui.add_space(8.0);
+                 crate::links::link_row(app, ui);
+             });
+             ui.add_space(10.0);
+diff --git a/crates/ui-egui/src/i18n/ar.tsv b/crates/ui-egui/src/i18n/ar.tsv
+index 0c67a91..80f6d5b 100644
+--- a/crates/ui-egui/src/i18n/ar.tsv
++++ b/crates/ui-egui/src/i18n/ar.tsv
+@@ -815,10 +815,7 @@
+ 	Tool Presets	الإعدادات المسبقة للأدوات
+ 	Tools	الأدوات
+ 	About PhotoCraft	حول PhotoCraft
+-	PhotoCraft Website	موقع PhotoCraft
+ 	PhotoCraft on GitHub	PhotoCraft على GitHub
+-	ArtCraft Website	موقع ArtCraft
+-	Join the ArtCraft Discord…	الانضمام إلى ArtCraft على Discord…
+ 	Report an Issue…	الإبلاغ عن مشكلة…
+ 	WIA Support…	دعم WIA…
+ 	Apply	تطبيق
+@@ -1108,7 +1105,6 @@
+ 	Diffusion	الانتشار
+ 	Discard the embedded profile (don't color manage)	تجاهل ملف التعريف المضمّن (دون إدارة الألوان)
+ 	Discontiguous	غير متجاور
+-	Discord	Discord
+ 	Dismiss	تجاهل
+ 	Display P3	Display P3
+ 	Display Text	نص العرض
+@@ -1243,7 +1239,6 @@
+ 	Invert All	عكس الكل
+ 	Invert has no settings.	«عكس» ليس له إعدادات.
+ 	Italic	مائل
+-	Join us on Discord	انضم إلينا على Discord
+ 	Justify all	ضبط الكل
+ 	Justify last centered	ضبط مع توسيط السطر الأخير
+ 	Justify last left	ضبط مع محاذاة السطر الأخير لليسار
+@@ -1650,7 +1645,6 @@
+ 	Apple Watch 45mm	Apple Watch 45mm
+ 	Aqua	أزرق مائي
+ 	Art & Illustration	الفن والرسم التوضيحي
+-	ArtCraft	ArtCraft
+ 	Background Eraser Tool	أداة ممحاة الخلفية
+ 	Bevel & Emboss	شطب ونقش
+ 	Blend Mode	وضع المزج
+@@ -1797,7 +1791,6 @@
+ 	Pen Tool	أداة القلم
+ 	Convert Point Tool	أداة تحويل النقطة
+ 	Photo	صورة فوتوغرافية
+-	PhotoCraft website	موقع PhotoCraft
+ 	Picas	بيكا
+ 	Pillow Emboss	نقش وسادي
+ 	Pixel Replacement	استبدال البكسل
+@@ -2874,7 +2867,6 @@ curves	Smooth	تنعيم
+ 	Light Gray	رمادي فاتح
+ 	Stop	إيقاف
+ # Status messages, system info and tool names
+-	Join the ArtCraft Discord ({url})	انضم إلى مجتمع ArtCraft على Discord ({url})
+ 	Nothing to paste: the clipboard holds no image	لا يوجد شيء للصقه: لا تحتوي الحافظة على أي صورة
+ 	Graphics adapter: {adapter}	محول الرسومات: {adapter}
+ 	Backend: {backend} ({type})	الواجهة الخلفية: {backend} ({type})
+diff --git a/crates/ui-egui/src/i18n/cs.tsv b/crates/ui-egui/src/i18n/cs.tsv
+index 8cd95ed..28d2aa4 100644
+--- a/crates/ui-egui/src/i18n/cs.tsv
++++ b/crates/ui-egui/src/i18n/cs.tsv
+@@ -929,10 +929,7 @@
+ 	Tool Presets	Přednastavení nástrojů
+ 	Tools	Nástroje
+ 	About PhotoCraft	O aplikaci PhotoCraft
+-	PhotoCraft Website	Web PhotoCraft
+ 	PhotoCraft on GitHub	PhotoCraft na GitHubu
+-	ArtCraft Website	Web ArtCraft
+-	Join the ArtCraft Discord…	Připojit se k Discordu ArtCraft…
+ 	Report an Issue…	Nahlásit problém…
+ 	WIA Support…	Podpora WIA…
+ 	Apply	Použít
+@@ -1222,7 +1219,6 @@
+ 	Diffusion	Difuze
+ 	Discard the embedded profile (don't color manage)	Zahodit vložený profil (bez správy barev)
+ 	Discontiguous	Nesouvislé
+-	Discord	Discord
+ 	Dismiss	Zavřít
+ 	Display P3	Display P3
+ 	Display Text	Zobrazený text
+@@ -1356,7 +1352,6 @@
+ 	Invert All	Invertovat vše
+ 	Invert has no settings.	Invertovat nemá žádná nastavení.
+ 	Italic	Kurzíva
+-	Join us on Discord	Přidejte se k nám na Discordu
+ 	Justify all	Do bloku vše
+ 	Justify last centered	Do bloku, poslední řádek na střed
+ 	Justify last left	Do bloku, poslední řádek vlevo
+@@ -1765,7 +1760,6 @@
+ 	Apple Watch 45mm	Apple Watch 45 mm
+ 	Aqua	Akvamarínové
+ 	Art & Illustration	Umění a ilustrace
+-	ArtCraft	ArtCraft
+ 	Background Eraser Tool	Nástroj guma pozadí
+ 	Bevel & Emboss	Úkos a reliéf
+ 	Blend Mode	Režim prolnutí
+@@ -1913,7 +1907,6 @@
+ 	Pen Tool	Nástroj pero
+ 	Convert Point Tool	Nástroj převést bod
+ 	Photo	Fotografie
+-	PhotoCraft website	Web PhotoCraft
+ 	Picas	Pica
+ 	Pillow Emboss	Polštářový reliéf
+ 	Pixel Replacement	Nahrazení pixelů
+@@ -3838,7 +3831,6 @@ navigator	Zoom	Zvětšení
+ 	on	zapnuto
+ 	off	vypnuto
+ 	This adjustment ({key}) is kept as imported and can't be edited yet.	Tato úprava ({key}) se uchovává v importované podobě a zatím ji nelze měnit.
+-	Join the ArtCraft Discord ({url})	Přidejte se na Discord ArtCraft ({url})
+ 	{index} of {total}	{index} z {total}
+ @plural	{n} step|{n} steps	{n} krok|{n} kroky|{n} kroků
+ 	{shortcut} assigned.	Zkratka {shortcut} přiřazena.
+diff --git a/crates/ui-egui/src/i18n/da.tsv b/crates/ui-egui/src/i18n/da.tsv
+index 46e71ed..ec4f2c7 100644
+--- a/crates/ui-egui/src/i18n/da.tsv
++++ b/crates/ui-egui/src/i18n/da.tsv
+@@ -545,11 +545,8 @@
+ 
+ # Help
+ 	About PhotoCraft	Om PhotoCraft
+-	PhotoCraft Website	PhotoCrafts websted
+ 	PhotoCraft on GitHub	PhotoCraft på GitHub
+ 	Report an Issue…	Rapportér et problem…
+-	ArtCraft Website	ArtCrafts websted
+-	Join the ArtCraft Discord…	Deltag i ArtCrafts Discord…
+ 	System Info…	Systemoplysninger…
+ 
+ # Tools and options bar
+@@ -1697,9 +1694,6 @@
+ 	Preserve Transparency	Bevar gennemsigtighed
+ 	Reverse	Omvendt
+ 	Align with layer	Justér med laget
+-	Join us on Discord	Mød os på Discord
+-	PhotoCraft website	PhotoCraft-websted
+-	ArtCraft	ArtCraft
+ 	GitHub	GitHub
+ 	No character style	Ingen tegnstil
+ 	No author	Ingen forfatter
+@@ -2124,7 +2118,6 @@
+ 	Delete tool preset	Slet værktøjsforudindstilling
+ 	Depth Jitter	Dybdejitter
+ 	Discontiguous	Usammenhængende
+-	Discord	Discord
+ 	Display P3	Display P3
+ 	Display Text	Vis tekst
+ 	Divide…	Opdel…
+@@ -3952,8 +3945,6 @@ curves	Smooth	Udjævn
+ 	Iris Blur	Irissløring
+ 	Ivy	Vedbend
+ 	Jag	Hak
+-	Join the ArtCraft Discord	Deltag i ArtCrafts Discord
+-	Join the ArtCraft Discord ({url})	Deltag i ArtCrafts Discord ({url})
+ 	Keeps the current texture when switching presets.	Beholder den aktuelle tekstur ved skift af forudindstilling.
+ 	Kernel	Kerne
+ 	Kerning: Metrics, Optical or a value in 1/1000 em (Alt+←/→ at the caret)	Knibning: metrik, optisk eller en værdi i 1/1000 em (Alt+←/→ ved indsætningspunktet)
+diff --git a/crates/ui-egui/src/i18n/de.tsv b/crates/ui-egui/src/i18n/de.tsv
+index 45fb326..c87e9fb 100644
+--- a/crates/ui-egui/src/i18n/de.tsv
++++ b/crates/ui-egui/src/i18n/de.tsv
+@@ -890,10 +890,7 @@
+ 	Tool Presets	Werkzeugvorgaben
+ 	Tools	Werkzeuge
+ 	About PhotoCraft	Über PhotoCraft
+-	PhotoCraft Website	PhotoCraft-Website
+ 	PhotoCraft on GitHub	PhotoCraft auf GitHub
+-	ArtCraft Website	ArtCraft-Website
+-	Join the ArtCraft Discord…	ArtCraft-Discord beitreten…
+ 	Report an Issue…	Problem melden…
+ 	WIA Support…	WIA-Unterstützung…
+ 	Apply	Anwenden
+@@ -1183,7 +1180,6 @@
+ 	Diffusion	Diffusion
+ 	Discard the embedded profile (don't color manage)	Eingebettetes Profil verwerfen (keine Farbverwaltung)
+ 	Discontiguous	Nicht benachbart
+-	Discord	Discord
+ 	Dismiss	Ausblenden
+ 	Display P3	Display P3
+ 	Display Text	Text anzeigen
+@@ -1318,7 +1314,6 @@
+ 	Invert All	Alle invertieren
+ 	Invert has no settings.	Invertieren hat keine Einstellungen.
+ 	Italic	Kursiv
+-	Join us on Discord	Tritt unserem Discord bei
+ 	Justify all	Alles im Blocksatz
+ 	Justify last centered	Letzte Zeile zentriert
+ 	Justify last left	Letzte Zeile links
+@@ -1725,7 +1720,6 @@
+ 	Apple Watch 45mm	Apple Watch 45 mm
+ 	Aqua	Aqua
+ 	Art & Illustration	Kunst & Illustration
+-	ArtCraft	ArtCraft
+ 	Background Eraser Tool	Hintergrund-Radiergummi-Werkzeug
+ 	Bevel & Emboss	Abgeflachte Kante & Relief
+ 	Blend Mode	Fusionsmodus
+@@ -1872,7 +1866,6 @@
+ 	Pen Tool	Stift-Werkzeug
+ 	Convert Point Tool	Punkt-umwandeln-Werkzeug
+ 	Photo	Foto
+-	PhotoCraft website	PhotoCraft-Website
+ 	Picas	Pica
+ 	Pillow Emboss	Polsterrelief
+ 	Pixel Replacement	Pixelersatz
+@@ -2903,7 +2896,6 @@ curves	Smooth	Glätten
+ 	Medium Blue	Mittelblau
+ 	Light Gray	Hellgrau
+ 	Stop	Stopp
+-	Join the ArtCraft Discord ({url})	Dem ArtCraft-Discord beitreten ({url})
+ 	Nothing to paste: the clipboard holds no image	Nichts einzufügen: Die Zwischenablage enthält kein Bild
+ 	Graphics adapter: {adapter}	Grafikadapter: {adapter}
+ 	Backend: {backend} ({type})	Backend: {backend} ({type})
+diff --git a/crates/ui-egui/src/i18n/el.tsv b/crates/ui-egui/src/i18n/el.tsv
+index 8f20dd6..b0d18a4 100644
+--- a/crates/ui-egui/src/i18n/el.tsv
++++ b/crates/ui-egui/src/i18n/el.tsv
+@@ -919,7 +919,6 @@
+ 	Quick Export As PNG	Γρήγορη εξαγωγή ως PNG
+ 	Radial Gradient	Ακτινική διαβάθμιση
+ 	Paints from the document's opening state	Ζωγραφίζει χρησιμοποιώντας την αρχική κατάσταση του εγγράφου
+-	PhotoCraft website	Ιστότοπος PhotoCraft
+ 	Pen Pressure	Πίεση γραφίδας
+ 	Pen Tilt	Κλίση γραφίδας
+ 	Portrait, 4 x 6	Κατακόρυφο, 4 × 6
+@@ -1343,7 +1342,6 @@
+ 	Custom Pixel Aspect Ratio	Προσαρμοσμένη αναλογία εικονοστοιχείων
+ 	32-bit Preview Options	Επιλογές προεπισκόπησης 32 bit
+ 	New Guide	Νέος οδηγός
+-	Join the ArtCraft Discord	Συμμετοχή στο Discord του ArtCraft
+ 	Report an Issue	Αναφορά προβλήματος
+ 	Load Files into Stack	Φόρτωση αρχείων σε στοίβα
+ 	Statistics	Στατιστικά
+@@ -2174,7 +2172,6 @@
+ 	Arc	Τόξο
+ 	Arch	Καμάρα
+ 	Art & Illustration	Τέχνη και εικονογράφηση
+-	ArtCraft Website	Ιστότοπος ArtCraft
+ 	Artboard Background Color	Χρώμα φόντου πίνακα σχεδίασης
+ 	Artboard Guides	Οδηγοί πίνακα σχεδίασης
+ 	Artboard from Group	Πίνακας σχεδίασης από ομάδα
+@@ -2678,8 +2675,6 @@
+ 	Iris Blur…	Θόλωση ίριδας…
+ 	Italic	Πλάγια
+ 	Jag	Οδοντωτό
+-	Join the ArtCraft Discord…	Συμμετοχή στο Discord του ArtCraft…
+-	Join us on Discord	Ελάτε στην κοινότητά μας στο Discord
+ 	Jpeg quality	Ποιότητα JPEG
+ 	Justification	Πλήρης στοίχιση
+ 	Justify	Πλήρης στοίχιση
+@@ -2919,7 +2914,6 @@
+ 	Performance	Επιδόσεις
+ 	Perspective Warp	Παραμόρφωση προοπτικής
+ 	Photo	Φωτογραφία
+-	PhotoCraft Website	Ιστότοπος PhotoCraft
+ 	PhotoCraft on GitHub	PhotoCraft στο GitHub
+ 	Photocopy	Φωτοαντίγραφο
+ 	Photography	Φωτογραφία
+@@ -3520,7 +3514,6 @@ cameraRaw	Yellow	Κίτρινο
+ 	Add to Swatches	Προσθήκη στα δείγματα χρωμάτων
+ 	Alt	Alt
+ 	Anamorphic 2:1 (2)	Αναμορφικό 2:1 (2)
+-	ArtCraft	ArtCraft
+ 	Blend If:	Ανάμειξη υπό όρους:
+ 	Current Layer:	Τρέχον επίπεδο:
+ 	Underlying Layer:	Υποκείμενο επίπεδο:
+@@ -3537,7 +3530,6 @@ cameraRaw	Yellow	Κίτρινο
+ 	D1/DV PAL Widescreen (1.46)	D1/DV PAL ευρεία οθόνη (1.46)
+ 	DVCPRO HD 1080/HDV 1080 (1.5)	DVCPRO HD 1080/HDV 1080 (1.5)
+ 	Darken Amount	Ποσότητα σκουρέματος
+-	Discord	Discord
+ 	Display P3	Display P3
+ 	Edit › Paste	Επεξεργασία › Επικόλληση
+ 	Edits that change the whole document, such as a layer's blend mode, opacity or visibility, redraw all of it.	Οι αλλαγές που επηρεάζουν όλο το έγγραφο, όπως η λειτουργία ανάμειξης, η αδιαφάνεια ή η ορατότητα ενός επιπέδου, το επανασχεδιάζουν ολόκληρο.
+diff --git a/crates/ui-egui/src/i18n/es.tsv b/crates/ui-egui/src/i18n/es.tsv
+index 6b365ce..3db7201 100644
+--- a/crates/ui-egui/src/i18n/es.tsv
++++ b/crates/ui-egui/src/i18n/es.tsv
+@@ -867,10 +867,7 @@
+ 	Tool Presets	Ajustes preestablecidos de herramienta
+ 	Tools	Herramientas
+ 	About PhotoCraft	Acerca de PhotoCraft
+-	PhotoCraft Website	Sitio web de PhotoCraft
+ 	PhotoCraft on GitHub	PhotoCraft en GitHub
+-	ArtCraft Website	Sitio web de ArtCraft
+-	Join the ArtCraft Discord…	Únase al Discord de ArtCraft…
+ 	Report an Issue…	Informar de un problema…
+ 	WIA Support…	Compatibilidad con WIA…
+ 	Apply	Aplicar
+@@ -1156,7 +1153,6 @@
+ 	Diffusion	Difusión
+ 	Discard the embedded profile (don't color manage)	Descartar el perfil incrustado (no gestionar el color)
+ 	Discontiguous	No contiguo
+-	Discord	Discord
+ 	Dismiss	Descartar
+ 	Display P3	Display P3
+ 	Display Text	Texto de visualización
+@@ -1290,7 +1286,6 @@
+ 	Invert All	Invertir todo
+ 	Invert has no settings.	Invertir no tiene ajustes.
+ 	Italic	Cursiva
+-	Join us on Discord	Únase a nuestro Discord
+ 	Justify all	Justificar todo
+ 	Justify last centered	Justificar última centrada
+ 	Justify last left	Justificar última a la izquierda
+@@ -1697,7 +1692,6 @@
+ 	Apple Watch 45mm	Apple Watch 45mm
+ 	Aqua	Aqua
+ 	Art & Illustration	Arte e ilustración
+-	ArtCraft	ArtCraft
+ 	Background Eraser Tool	Herramienta Borrador de fondos
+ 	Bevel & Emboss	Bisel y relieve
+ 	Blend Mode	Modo de fusión
+@@ -1845,7 +1839,6 @@
+ 	Pen Tool	Herramienta Pluma
+ 	Convert Point Tool	Herramienta Convertir punto
+ 	Photo	Fotografía
+-	PhotoCraft website	Sitio web de PhotoCraft
+ 	Picas	Picas
+ 	Pillow Emboss	Relieve en almohadilla
+ 	Pixel Replacement	Sustitución de píxeles
+@@ -3595,7 +3588,6 @@ layerLabel	No Color	Sin color
+ 	Custom Pixel Aspect Ratio	Relación de aspecto de píxel personalizada
+ 	32-bit Preview Options	Opciones de vista previa de 32 bits
+ 	New Guide	Nueva guía
+-	Join the ArtCraft Discord	Únase al Discord de ArtCraft
+ 	Report an Issue	Informar de un problema
+ 	Load Files into Stack	Cargar archivos en pila
+ 	Statistics	Estadísticas
+@@ -4126,7 +4118,6 @@ layerLabel	No Color	Sin color
+ navigator	Zoom	Zoom
+ 	Apply {option}: {state}	Aplicar {option}: {state}
+ 	This adjustment ({key}) is kept as imported and can't be edited yet.	Este ajuste ({key}) se conserva como se importó y aún no puede editarse.
+-	Join the ArtCraft Discord ({url})	Unirse al Discord de ArtCraft ({url})
+ 	{index} of {total}	{index} de {total}
+ 	{shortcut} assigned.	{shortcut} asignado.
+ 	{shortcut} is already in use by {commands} and will be removed from it when you click OK.	{shortcut} ya está en uso por {commands} y se quitará al hacer clic en Aceptar.
+diff --git a/crates/ui-egui/src/i18n/fi.tsv b/crates/ui-egui/src/i18n/fi.tsv
+index b08a224..c96f857 100644
+--- a/crates/ui-egui/src/i18n/fi.tsv
++++ b/crates/ui-egui/src/i18n/fi.tsv
+@@ -546,11 +546,8 @@
+ 
+ # Help
+ 	About PhotoCraft	Tietoja PhotoCraftista
+-	PhotoCraft Website	PhotoCraft-verkkosivusto
+ 	PhotoCraft on GitHub	PhotoCraft GitHubissa
+ 	Report an Issue…	Ilmoita ongelmasta…
+-	ArtCraft Website	ArtCraft-verkkosivusto
+-	Join the ArtCraft Discord…	Liity ArtCraftin Discordiin…
+ 	System Info…	Järjestelmän tiedot…
+ 
+ # Tools and options bar
+@@ -1698,9 +1695,6 @@
+ 	Preserve Transparency	Säilytä läpinäkyvyys
+ 	Reverse	Käännä järjestys
+ 	Align with layer	Tasaa tason kanssa
+-	Join us on Discord	Liity Discordiin
+-	PhotoCraft website	PhotoCraft-verkkosivusto
+-	ArtCraft	ArtCraft
+ 	GitHub	GitHub
+ 	No character style	Ei merkkityyliä
+ 	No author	Ei tekijää
+@@ -2125,7 +2119,6 @@
+ 	Delete tool preset	Poista työkalun esiasetus
+ 	Depth Jitter	Syvyyden vaihtelu
+ 	Discontiguous	Epäyhtenäinen
+-	Discord	Discord
+ 	Display P3	Display P3
+ 	Display Text	Näytä teksti
+ 	Divide…	Jaa…
+@@ -3953,8 +3946,6 @@ curves	Smooth	Tasoita
+ 	Iris Blur	Iiris-sumennus
+ 	Ivy	Muratti
+ 	Jag	Rosoisuus
+-	Join the ArtCraft Discord	Liity ArtCraftin Discordiin
+-	Join the ArtCraft Discord ({url})	Liity ArtCraftin Discordiin ({url})
+ 	Keeps the current texture when switching presets.	Säilyttää nykyisen tekstuurin esiasetusta vaihdettaessa.
+ 	Kernel	Ydin
+ 	Kerning: Metrics, Optical or a value in 1/1000 em (Alt+←/→ at the caret)	Parivälistys: metriikka, optinen tai arvo 1/1000 em (Alt+←/→ kohdistimessa)
+diff --git a/crates/ui-egui/src/i18n/fr.tsv b/crates/ui-egui/src/i18n/fr.tsv
+index 89bdec4..0c73e04 100644
+--- a/crates/ui-egui/src/i18n/fr.tsv
++++ b/crates/ui-egui/src/i18n/fr.tsv
+@@ -883,10 +883,7 @@
+ 	Tool Presets	Préréglages d'outils
+ 	Tools	Outils
+ 	About PhotoCraft	À propos de PhotoCraft
+-	PhotoCraft Website	Site web de PhotoCraft
+ 	PhotoCraft on GitHub	PhotoCraft sur GitHub
+-	ArtCraft Website	Site web d'ArtCraft
+-	Join the ArtCraft Discord…	Rejoindre le Discord d'ArtCraft…
+ 	Report an Issue…	Signaler un problème…
+ 	WIA Support…	Prise en charge de WIA…
+ 	Apply	Appliquer
+@@ -1172,7 +1169,6 @@
+ 	Diffusion	Diffusion
+ 	Discard the embedded profile (don't color manage)	Ignorer le profil incorporé (sans gestion des couleurs)
+ 	Discontiguous	Non contigu
+-	Discord	Discord
+ 	Dismiss	Fermer
+ 	Display P3	Display P3
+ 	Display Text	Texte affiché
+@@ -1301,7 +1297,6 @@
+ 	Invert All	Tout inverser
+ 	Invert has no settings.	Inverser n'a aucun réglage.
+ 	Italic	Italique
+-	Join us on Discord	Rejoignez-nous sur Discord
+ 	Justify all	Justifier tout
+ 	Justify last centered	Justifier, dernière ligne centrée
+ 	Justify last left	Justifier, dernière ligne à gauche
+@@ -1706,7 +1701,6 @@
+ 	Apple Watch 45mm	Apple Watch 45 mm
+ 	Aqua	Aqua
+ 	Art & Illustration	Art et illustration
+-	ArtCraft	ArtCraft
+ 	Background Eraser Tool	Outil Gomme d'arrière-plan
+ 	Bevel & Emboss	Biseau et relief
+ 	Blend Mode	Mode de fusion
+@@ -1853,7 +1847,6 @@
+ 	Pen Tool	Outil Plume
+ 	Convert Point Tool	Outil Conversion de point
+ 	Photo	Photo
+-	PhotoCraft website	Site web de PhotoCraft
+ 	Picas	Picas
+ 	Pillow Emboss	Relief en coussin
+ 	Pixel Replacement	Remplacement de pixels
+@@ -3893,8 +3886,6 @@ smartSvg	AI/PDF/EPS contents will be edited as SVG. Saving replaces the embedded
+ 	Iris Blur	Flou d'iris
+ 	Ivy	Lierre
+ 	Jag	Dentelé
+-	Join the ArtCraft Discord	Rejoindre le Discord d'ArtCraft
+-	Join the ArtCraft Discord ({url})	Rejoindre le Discord d'ArtCraft ({url})
+ 	Kernel	Noyau
+ 	Kerning: Metrics, Optical or a value in 1/1000 em (Alt+←/→ at the caret)	Crénage : Métriques, Optique ou une valeur en 1/1000 em (Alt+←/→ au point d'insertion)
+ 	Keyboard	Clavier
+diff --git a/crates/ui-egui/src/i18n/hu.tsv b/crates/ui-egui/src/i18n/hu.tsv
+index c5a61ba..5e74590 100644
+--- a/crates/ui-egui/src/i18n/hu.tsv
++++ b/crates/ui-egui/src/i18n/hu.tsv
+@@ -518,7 +518,6 @@
+ 	Artboard Guides	Rajztábla-segédvonalak
+ 	Artboards to Files	Rajztáblák fájlokba
+ 	Artboards to PDF	Rajztáblák PDF-be
+-	ArtCraft Website	ArtCraft-weboldal
+ 	Average	Átlag
+ 	Background From Layer	Háttér a rétegből
+ 	Bitmap…	Bittérkép…
+@@ -684,8 +683,6 @@
+ 	Internet Standard RGB	Internetes szabványos RGB
+ 	Inverse	Megfordítás
+ 	Iris Blur…	Íriszelmosás…
+-	Join the ArtCraft Discord	Csatlakozás az ArtCraft Discordhoz
+-	Join the ArtCraft Discord…	Csatlakozás az ArtCraft Discordhoz…
+ 	Language	Nyelv
+ 	Language Options	Nyelvi beállítások
+ 	Large	Nagy
+@@ -780,7 +777,6 @@
+ 	Pattern Preview	Mintázat előnézete
+ 	PhotoCraft	PhotoCraft
+ 	PhotoCraft on GitHub	PhotoCraft a GitHubon
+-	PhotoCraft Website	PhotoCraft-weboldal
+ 	Photography	Fotózás
+ 	Picture Frame…	Képkeret…
+ 	Pinch…	Becsípés…
+@@ -1846,7 +1842,6 @@ layerLabel	Magenta	Bíbor
+ 	Delete Tool Preset	Eszköz-előbeállítás törlése
+ 	Delete tool preset	Eszköz-előbeállítás törlése
+ 	Delete Workspace	Munkaterület törlése
+-	Discord	Discord
+ 	Doc: {w} × {h} px	Dok.: {w} × {h} px
+ 	Drag a box or click four corners · drag the corners onto the edges of a skewed shape · {commit} commits · Esc cancels	Húzz egy keretet, vagy kattints a négy sarokra · húzd a sarkokat a ferde alakzat éleire · {commit}: véglegesítés · Esc: megszakítás
+ 	Drag a crop box · drag inside to move · edges resize ({ratio} ratio, {centre} centre) · Space moves while drawing · arrows nudge · X swaps orientation · {commit} commits · Esc cancels	Húzz egy körbevágási keretet · belül húzva mozgatod · az élekkel átméretezed ({ratio}: arány, {centre}: középről) · Space: mozgatás rajzolás közben · nyilak: léptetés · X: tájolás cseréje · {commit}: véglegesítés · Esc: megszakítás
+@@ -1901,7 +1896,6 @@ layerLabel	Magenta	Bíbor
+ 	Intersect with	Metszet ezzel
+ 	Intersect with selection  ({key})	Metszet a kijelöléssel  ({key})
+ 	Invalid panel layout; restored the default dock	Érvénytelen panelelrendezés; az alapértelmezett dokkolás visszaállítva
+-	Join the ArtCraft Discord ({url})	Csatlakozz az ArtCraft Discord-szerveréhez ({url})
+ 	Keyboard Shortcuts	Billentyűparancsok
+ 	Kind	Fajta
+ 	Lasso	Lasszó
+@@ -3133,7 +3127,6 @@ cameraRaw	Yellow	Sárga
+ 	Arch	Boltív
+ 	Area	Terület
+ 	Artboard Tool	Rajztábla
+-	ArtCraft	ArtCraft
+ 	Ask	Rákérdezés
+ 	Aspect Ratio	Oldalarány
+ 	Assign Profile	Profil hozzárendelése
+@@ -3392,7 +3385,6 @@ cameraRaw	Yellow	Sárga
+ 	Interpret Footage	Videoanyag értelmezése
+ 	Interval	Intervallum
+ 	Invalid {mode} profile	Érvénytelen profil ({mode})
+-	Join us on Discord	Csatlakozz hozzánk a Discordon
+ 	Keep Using CPU	Marad a CPU
+ 	Kernel	Szűrőmag
+ 	Keyboard	Billentyűzet
+@@ -3513,7 +3505,6 @@ cameraRaw	Yellow	Sárga
+ 	Perimeter	Kerület
+ 	Perspective Crop Tool	Perspektivikus körbevágás
+ 	PhotoCraft is using the CPU image compositor. The window may still use your graphics adapter.	A PhotoCraft a CPU-s képösszeállítót használja. Az ablak megjelenítése ettől még használhatja a grafikus adaptert.
+-	PhotoCraft website	PhotoCraft-weboldal
+ 	PhotoCraft — Screen Color Picker	PhotoCraft — Képernyő-színválasztó
+ 	Photomerge	Fotóegyesítés
+ 	Pick a screen pixel or press Esc to cancel	Válassz egy pixelt a képernyőn, vagy nyomd meg az Esc billentyűt a megszakításhoz
+diff --git a/crates/ui-egui/src/i18n/id.tsv b/crates/ui-egui/src/i18n/id.tsv
+index e5058af..96c3e60 100644
+--- a/crates/ui-egui/src/i18n/id.tsv
++++ b/crates/ui-egui/src/i18n/id.tsv
+@@ -876,10 +876,7 @@
+ 	Tool Presets	Preset Alat
+ 	Tools	Alat
+ 	About PhotoCraft	Tentang PhotoCraft
+-	PhotoCraft Website	Situs Web PhotoCraft
+ 	PhotoCraft on GitHub	PhotoCraft di GitHub
+-	ArtCraft Website	Situs Web ArtCraft
+-	Join the ArtCraft Discord…	Gabung ke Discord ArtCraft…
+ 	Report an Issue…	Laporkan Masalah…
+ 	WIA Support…	Dukungan WIA…
+ 	Apply	Terapkan
+@@ -1180,7 +1177,6 @@
+ 	Diffusion	Difusi
+ 	Discard the embedded profile (don't color manage)	Buang profil tertanam (tanpa manajemen warna)
+ 	Discontiguous	Tidak Berdekatan
+-	Discord	Discord
+ 	Dismiss	Tutup
+ 	Display P3	Display P3
+ 	Display Text	Teks Tampilan
+@@ -1309,7 +1305,6 @@
+ 	Invert All	Balikkan Semua
+ 	Invert has no settings.	Invert tidak punya pengaturan.
+ 	Italic	Miring
+-	Join us on Discord	Gabung bareng kami di Discord
+ 	Justify all	Rata penuh semua
+ 	Justify last centered	Rata penuh, baris terakhir di tengah
+ 	Justify last left	Rata penuh, baris terakhir di kiri
+@@ -1714,7 +1709,6 @@
+ 	Apple Watch 45mm	Apple Watch 45mm
+ 	Aqua	Aqua
+ 	Art & Illustration	Seni & Ilustrasi
+-	ArtCraft	ArtCraft
+ 	Background Eraser Tool	Alat Background Eraser
+ 	Bevel & Emboss	Bevel & Emboss
+ 	Blend Mode	Mode Blend
+@@ -1861,7 +1855,6 @@
+ 	Pen Tool	Alat Pen
+ 	Convert Point Tool	Alat Convert Point
+ 	Photo	Foto
+-	PhotoCraft website	Situs web PhotoCraft
+ 	Picas	Pica
+ 	Pillow Emboss	Pillow Emboss
+ 	Pixel Replacement	Penggantian Piksel
+diff --git a/crates/ui-egui/src/i18n/it.tsv b/crates/ui-egui/src/i18n/it.tsv
+index 367c726..de1820e 100644
+--- a/crates/ui-egui/src/i18n/it.tsv
++++ b/crates/ui-egui/src/i18n/it.tsv
+@@ -910,10 +910,7 @@
+ 	Tool Presets	Predefiniti strumento
+ 	Tools	Strumenti
+ 	About PhotoCraft	Informazioni su PhotoCraft
+-	PhotoCraft Website	Sito web PhotoCraft
+ 	PhotoCraft on GitHub	PhotoCraft su GitHub
+-	ArtCraft Website	Sito web ArtCraft
+-	Join the ArtCraft Discord…	Unisciti al Discord di ArtCraft…
+ 	Report an Issue…	Segnala un problema…
+ 	WIA Support…	Supporto WIA…
+ 	Apply	Applica
+@@ -1202,7 +1199,6 @@
+ 	Diffusion	Diffusione
+ 	Discard the embedded profile (don't color manage)	Scarta profilo incorporato (non gestire colore)
+ 	Discontiguous	Non contiguo
+-	Discord	Discord
+ 	Dismiss	Chiudi
+ 	Display P3	Display P3
+ 	Display Text	Mostra testo
+@@ -1336,7 +1332,6 @@
+ 	Invert All	Inverti tutto
+ 	Invert has no settings.	Inverti non ha impostazioni.
+ 	Italic	Corsivo
+-	Join us on Discord	Unisciti al nostro Discord
+ 	Justify all	Giustifica tutto
+ 	Justify last centered	Giustifica ultimo centrato
+ 	Justify last left	Giustifica ultimo a sinistra
+@@ -1743,7 +1738,6 @@
+ 	Apple Watch 45mm	Apple Watch 45mm
+ 	Aqua	Acqua
+ 	Art & Illustration	Arte e illustrazione
+-	ArtCraft	ArtCraft
+ 	Background Eraser Tool	Strumento Gomma per sfondo
+ 	Bevel & Emboss	Smusso e rilievo
+ 	Blend Mode	Metodo di fusione
+@@ -1890,7 +1884,6 @@
+ 	Pen Tool	Strumento Penna
+ 	Convert Point Tool	Strumento Converti punto
+ 	Photo	Foto
+-	PhotoCraft website	Sito web PhotoCraft
+ 	Picas	Pica
+ 	Pillow Emboss	Rilievo cuscino
+ 	Pixel Replacement	Sostituzione pixel
+@@ -3648,7 +3641,6 @@ layerLabel	No Color	Nessun colore
+ 	Custom Pixel Aspect Ratio	Proporzioni pixel personalizzate
+ 	32-bit Preview Options	Opzioni anteprima 32 bit
+ 	New Guide	Nuova guida
+-	Join the ArtCraft Discord	Unisciti al Discord di ArtCraft
+ 	Report an Issue	Segnala un problema
+ 	Load Files into Stack	Carica file in pila
+ 	Statistics	Statistiche
+@@ -4199,7 +4191,6 @@ navigator	Zoom	Zoom
+ 	on	attivo
+ 	off	disattivo
+ 	This adjustment ({key}) is kept as imported and can't be edited yet.	Questa regolazione ({key}) resta come è stata importata e non si può ancora modificare.
+-	Join the ArtCraft Discord ({url})	Unisciti al Discord di ArtCraft ({url})
+ 	{index} of {total}	{index} di {total}
+ 	{shortcut} assigned.	{shortcut} assegnata.
+ 	{shortcut} is already in use by {commands} and will be removed from it when you click OK.	{shortcut} è già usata da {commands} e verrà rimossa quando fai clic su OK.
+diff --git a/crates/ui-egui/src/i18n/ja.tsv b/crates/ui-egui/src/i18n/ja.tsv
+index 2eee514..421446e 100644
+--- a/crates/ui-egui/src/i18n/ja.tsv
++++ b/crates/ui-egui/src/i18n/ja.tsv
+@@ -921,10 +921,7 @@
+ 	Tool Presets	ツールプリセット
+ 	Tools	ツール
+ 	About PhotoCraft	PhotoCraft について
+-	PhotoCraft Website	PhotoCraft の Web サイト
+ 	PhotoCraft on GitHub	GitHub 上の PhotoCraft
+-	ArtCraft Website	ArtCraft の Web サイト
+-	Join the ArtCraft Discord…	ArtCraft の Discord に参加…
+ 	Report an Issue…	問題を報告…
+ 	WIA Support…	WIA サポート…
+ 	Apply	適用
+@@ -1211,7 +1208,6 @@
+ 	Diffusion	拡散
+ 	Discard the embedded profile (don't color manage)	埋め込みプロファイルを破棄 (カラーマネジメントしない)
+ 	Discontiguous	不連続
+-	Discord	Discord
+ 	Dismiss	閉じる
+ 	Display P3	Display P3
+ 	Display Text	表示テキスト
+@@ -1345,7 +1341,6 @@
+ 	Invert All	すべて反転
+ 	Invert has no settings.	階調の反転には設定がありません。
+ 	Italic	イタリック
+-	Join us on Discord	Discord に参加
+ 	Justify all	均等配置 (最終行も)
+ 	Justify last centered	最終行中央揃えの両端揃え
+ 	Justify last left	最終行左揃えの両端揃え
+@@ -1750,7 +1745,6 @@
+ 	Apple Watch 45mm	Apple Watch 45mm
+ 	Aqua	アクア
+ 	Art & Illustration	アート・イラスト
+-	ArtCraft	ArtCraft
+ 	Background Eraser Tool	背景消しゴムツール
+ 	Bevel & Emboss	ベベルとエンボス
+ 	Blend Mode	描画モード
+@@ -1898,7 +1892,6 @@
+ 	Pen Tool	ペンツール
+ 	Convert Point Tool	アンカーポイントの変換ツール
+ 	Photo	写真
+-	PhotoCraft website	PhotoCraft の Web サイト
+ 	Picas	パイカ
+ 	Pillow Emboss	ピローエンボス
+ 	Pixel Replacement	ピクセルの置き換え
+@@ -3461,7 +3454,6 @@ fontWeight	Italic	斜体
+ 	Install Plug-in	プラグインをインストール
+ 	Intersect with	共通部分
+ 	Intersect with selection  (⇧⌥)	選択範囲との共通部分  (⇧⌥)
+-	Join the ArtCraft Discord	ArtCraft の Discord に参加
+ 	Keep proportions	縦横比を固定
+ 	Keep view in sync	ビューを同期
+ 	Keeps the current texture when switching presets.	プリセットを切り替えても現在のテクスチャを維持します。
+diff --git a/crates/ui-egui/src/i18n/ko.tsv b/crates/ui-egui/src/i18n/ko.tsv
+index 43f7dea..824372d 100644
+--- a/crates/ui-egui/src/i18n/ko.tsv
++++ b/crates/ui-egui/src/i18n/ko.tsv
+@@ -877,10 +877,7 @@
+ 	Tool Presets	도구 사전 설정
+ 	Tools	도구
+ 	About PhotoCraft	PhotoCraft 정보
+-	PhotoCraft Website	PhotoCraft 웹사이트
+ 	PhotoCraft on GitHub	GitHub의 PhotoCraft
+-	ArtCraft Website	ArtCraft 웹사이트
+-	Join the ArtCraft Discord…	ArtCraft Discord 참여…
+ 	Report an Issue…	문제 신고…
+ 	WIA Support…	WIA 지원…
+ 	Apply	적용
+@@ -1188,7 +1185,6 @@
+ 	Diffusion	확산
+ 	Discard the embedded profile (don't color manage)	포함된 프로파일 버리기(색상 관리 안 함)
+ 	Discontiguous	비인접
+-	Discord	Discord
+ 	Dismiss	닫기
+ 	Display P3	Display P3
+ 	Display Text	표시 텍스트
+@@ -1316,7 +1312,6 @@
+ 	Invert All	모두 반전
+ 	Invert has no settings.	반전에는 설정이 없습니다.
+ 	Italic	기울임꼴
+-	Join us on Discord	Discord 참여
+ 	Justify all	모든 줄 양쪽 정렬
+ 	Justify last centered	마지막 줄 가운데 정렬
+ 	Justify last left	마지막 줄 왼쪽 정렬
+@@ -1725,7 +1720,6 @@
+ 	Apple Watch 45mm	Apple Watch 45mm
+ 	Aqua	청록
+ 	Art & Illustration	아트 및 일러스트레이션
+-	ArtCraft	ArtCraft
+ 	Background Eraser Tool	배경 지우개 도구
+ 	Bevel & Emboss	경사와 엠보스
+ 	Blend Mode	혼합 모드
+@@ -1873,7 +1867,6 @@
+ 	Pen Tool	펜 도구
+ 	Convert Point Tool	기준점 변환 도구
+ 	Photo	사진
+-	PhotoCraft website	PhotoCraft 웹사이트
+ 	Picas	파이카
+ 	Pillow Emboss	쿠션 엠보스
+ 	Pixel Replacement	픽셀 대체
+@@ -2813,7 +2806,6 @@ cameraRaw	Color	색상
+ 	Custom Pixel Aspect Ratio	사용자 정의 픽셀 종횡비
+ 	32-bit Preview Options	32비트 미리 보기 옵션
+ 	New Guide	새 안내선
+-	Join the ArtCraft Discord	ArtCraft Discord 참여
+ 	Report an Issue	문제 신고
+ 	WIA Support	WIA 지원
+ 	Load Files into Stack	파일을 스택으로 불러오기
+diff --git a/crates/ui-egui/src/i18n/live_tests.rs b/crates/ui-egui/src/i18n/live_tests.rs
+index f5e18da..508ffd9 100644
+--- a/crates/ui-egui/src/i18n/live_tests.rs
++++ b/crates/ui-egui/src/i18n/live_tests.rs
+@@ -478,8 +478,8 @@ fn arabic_labels_are_laid_out_right_to_left() {
+         let label = tr(lang("ar"), "No properties");
+         assert_eq!(label, "لا توجد خصائص");
+         assert!(x_of(label, 'ل') > x_of(label, 'ص'), "{label}: first word at the right");
+-        let join = tr(lang("ar"), "Join us on Discord");
+-        assert!(x_of(join, 'D') < x_of(join, 'ن'), "{join}: Discord at the left");
++        let about = tr(lang("ar"), "About PhotoCraft");
++        assert!(x_of(about, 'P') < x_of(about, 'ح'), "{about}: PhotoCraft at the left");
+     });
+ }
+ 
+diff --git a/crates/ui-egui/src/i18n/nb.tsv b/crates/ui-egui/src/i18n/nb.tsv
+index d723200..0142661 100644
+--- a/crates/ui-egui/src/i18n/nb.tsv
++++ b/crates/ui-egui/src/i18n/nb.tsv
+@@ -545,11 +545,8 @@
+ 
+ # Help
+ 	About PhotoCraft	Om PhotoCraft
+-	PhotoCraft Website	PhotoCrafts nettsted
+ 	PhotoCraft on GitHub	PhotoCraft på GitHub
+ 	Report an Issue…	Rapporter et problem…
+-	ArtCraft Website	ArtCraft-nettstedet
+-	Join the ArtCraft Discord…	Bli med i ArtCraft-Discord…
+ 	System Info…	Systeminformasjon…
+ 
+ # Tools and options bar
+@@ -1697,9 +1694,6 @@
+ 	Preserve Transparency	Bevar gjennomsiktighet
+ 	Reverse	Snu rekkefølgen
+ 	Align with layer	Juster etter lag
+-	Join us on Discord	Bli med oss på Discord
+-	PhotoCraft website	PhotoCrafts nettsted
+-	ArtCraft	ArtCraft
+ 	GitHub	GitHub
+ 	No character style	Ingen tegnstil
+ 	No author	Ingen forfatter
+@@ -2124,7 +2118,6 @@
+ 	Delete tool preset	Slett verktøyforvalg
+ 	Depth Jitter	Dybdevariasjon
+ 	Discontiguous	Ikke sammenhengende
+-	Discord	Discord
+ 	Display P3	Display P3
+ 	Display Text	Vis tekst
+ 	Divide…	Del…
+@@ -3952,8 +3945,6 @@ curves	Smooth	Jevn ut
+ 	Iris Blur	Irissløring
+ 	Ivy	Eføy
+ 	Jag	Takking
+-	Join the ArtCraft Discord	Bli med i ArtCraft-Discord
+-	Join the ArtCraft Discord ({url})	Bli med i ArtCraft-Discord ({url})
+ 	Keeps the current texture when switching presets.	Beholder gjeldende tekstur når du bytter forvalg.
+ 	Kernel	Kjerne
+ 	Kerning: Metrics, Optical or a value in 1/1000 em (Alt+←/→ at the caret)	Kniping: metrisk, optisk eller en verdi i 1/1000 em (Alt+←/→ ved innsettingspunktet)
+diff --git a/crates/ui-egui/src/i18n/nl.tsv b/crates/ui-egui/src/i18n/nl.tsv
+index 7ad2900..accb064 100644
+--- a/crates/ui-egui/src/i18n/nl.tsv
++++ b/crates/ui-egui/src/i18n/nl.tsv
+@@ -844,10 +844,7 @@
+ 	Tool Presets	Gereedschapsvoorinstellingen
+ 	Tools	Gereedschappen
+ 	About PhotoCraft	Over PhotoCraft
+-	PhotoCraft Website	Website van PhotoCraft
+ 	PhotoCraft on GitHub	PhotoCraft op GitHub
+-	ArtCraft Website	Website van ArtCraft
+-	Join the ArtCraft Discord…	Deelnemen aan de ArtCraft-Discord…
+ 	Report an Issue…	Probleem melden…
+ 	WIA Support…	WIA-ondersteuning…
+ 	Apply	Toepassen
+@@ -1135,7 +1132,6 @@
+ 	Diffusion	Diffusie
+ 	Discard the embedded profile (don't color manage)	Het ingesloten profiel negeren (geen kleurbeheer)
+ 	Discontiguous	Niet-aaneengesloten
+-	Discord	Discord
+ 	Dismiss	Sluiten
+ 	Display P3	Display P3
+ 	Display Text	Tekst tonen
+@@ -1270,7 +1266,6 @@
+ 	Invert All	Alles omkeren
+ 	Invert has no settings.	Omkeren heeft geen instellingen.
+ 	Italic	Cursief
+-	Join us on Discord	Doe mee op Discord
+ 	Justify all	Alles uitvullen
+ 	Justify last centered	Uitvullen, laatste regel gecentreerd
+ 	Justify last left	Uitvullen, laatste regel links
+@@ -1673,7 +1668,6 @@
+ 	Apple Watch 45mm	Apple Watch 45 mm
+ 	Aqua	Aqua
+ 	Art & Illustration	Kunst en illustratie
+-	ArtCraft	ArtCraft
+ 	Background Eraser Tool	Achtergrondgumgereedschap
+ 	Bevel & Emboss	Schuine kant en reliëf
+ 	Blend Mode	Overvloeimodus
+@@ -1820,7 +1814,6 @@
+ 	Pen Tool	Pengereedschap
+ 	Convert Point Tool	Punt-converteergereedschap
+ 	Photo	Foto
+-	PhotoCraft website	Website van PhotoCraft
+ 	Picas	Pica's
+ 	Pillow Emboss	Kussenreliëf
+ 	Pixel Replacement	Pixelvervanging
+@@ -3136,7 +3129,6 @@ cameraRaw	Color	Kleur
+ 	Custom Pixel Aspect Ratio	Aangepaste pixelverhouding
+ 	32-bit Preview Options	Voorvertoningsopties 32-bit
+ 	New Guide	Nieuwe hulplijn
+-	Join the ArtCraft Discord	Deelnemen aan de ArtCraft-Discord
+ 	Report an Issue	Probleem melden
+ 	Load Files into Stack	Bestanden in stapel laden
+ 	Statistics	Statistieken
+diff --git a/crates/ui-egui/src/i18n/pl.tsv b/crates/ui-egui/src/i18n/pl.tsv
+index fe13d8f..2fad09b 100644
+--- a/crates/ui-egui/src/i18n/pl.tsv
++++ b/crates/ui-egui/src/i18n/pl.tsv
+@@ -897,10 +897,7 @@
+ 	Tool Presets	Ustawienia wstępne narzędzi
+ 	Tools	Narzędzia
+ 	About PhotoCraft	O programie PhotoCraft
+-	PhotoCraft Website	Strona internetowa PhotoCraft
+ 	PhotoCraft on GitHub	PhotoCraft na GitHubie
+-	ArtCraft Website	Strona internetowa ArtCraft
+-	Join the ArtCraft Discord…	Dołącz do Discorda ArtCraft…
+ 	Report an Issue…	Zgłoś problem…
+ 	WIA Support…	Obsługa WIA…
+ 	Apply	Zastosuj
+@@ -1202,7 +1199,6 @@
+ 	Diffusion	Dyfuzja
+ 	Discard the embedded profile (don't color manage)	Odrzuć osadzony profil (bez zarządzania kolorami)
+ 	Discontiguous	Niesąsiadujące
+-	Discord	Discord
+ 	Dismiss	Zamknij
+ 	Display P3	Display P3
+ 	Display Text	Tekst wyświetlany
+@@ -1333,7 +1329,6 @@
+ 	Invert All	Odwróć wszystko
+ 	Invert has no settings.	Odwracanie nie ma ustawień.
+ 	Italic	Kursywa
+-	Join us on Discord	Dołącz do nas na Discordzie
+ 	Justify all	Wyjustuj wszystko
+ 	Justify last centered	Wyjustuj, ostatni wiersz wyśrodkowany
+ 	Justify last left	Wyjustuj, ostatni wiersz do lewej
+@@ -1736,7 +1731,6 @@
+ 	Apple Watch 45mm	Apple Watch 45 mm
+ 	Aqua	Błękit morski
+ 	Art & Illustration	Sztuka i ilustracja
+-	ArtCraft	ArtCraft
+ 	Background Eraser Tool	Narzędzie Gumka tła
+ 	Bevel & Emboss	Ukos i płaskorzeźba
+ 	Blend Mode	Tryb mieszania
+@@ -1884,7 +1878,6 @@
+ 	Pen Tool	Narzędzie Pióro
+ 	Convert Point Tool	Narzędzie Konwertuj punkt
+ 	Photo	Zdjęcie
+-	PhotoCraft website	Strona internetowa PhotoCraft
+ 	Picas	Pikasy
+ 	Pillow Emboss	Płaskorzeźba poduszkowa
+ 	Pixel Replacement	Zamiana pikseli
+@@ -3279,7 +3272,6 @@ cameraRaw	Roughness	Chropowatość
+ 	Custom Pixel Aspect Ratio	Niestandardowe proporcje pikseli
+ 	32-bit Preview Options	Opcje podglądu 32-bitowego
+ 	New Guide	Nowa prowadnica
+-	Join the ArtCraft Discord	Dołącz do Discorda ArtCraft
+ 	Report an Issue	Zgłoś problem
+ 	WIA Support	Obsługa WIA
+ 	Load Files into Stack	Wczytaj pliki do stosu
+diff --git a/crates/ui-egui/src/i18n/pt-br.tsv b/crates/ui-egui/src/i18n/pt-br.tsv
+index f12a596..f1bbb24 100644
+--- a/crates/ui-egui/src/i18n/pt-br.tsv
++++ b/crates/ui-egui/src/i18n/pt-br.tsv
+@@ -877,10 +877,7 @@
+ 	Tool Presets	Predefinições de ferramentas
+ 	Tools	Ferramentas
+ 	About PhotoCraft	Sobre o PhotoCraft
+-	PhotoCraft Website	Site do PhotoCraft
+ 	PhotoCraft on GitHub	PhotoCraft no GitHub
+-	ArtCraft Website	Site do ArtCraft
+-	Join the ArtCraft Discord…	Participe do Discord do ArtCraft…
+ 	Report an Issue…	Relatar um problema…
+ 	WIA Support…	Suporte a WIA…
+ 	Apply	Aplicar
+@@ -1168,7 +1165,6 @@
+ 	Diffusion	Difusão
+ 	Discard the embedded profile (don't color manage)	Descartar o perfil incorporado (não gerenciar cores)
+ 	Discontiguous	Não contíguo
+-	Discord	Discord
+ 	Dismiss	Dispensar
+ 	Display P3	Display P3
+ 	Display Text	Texto de exibição
+@@ -1296,7 +1292,6 @@
+ 	Invert All	Inverter tudo
+ 	Invert has no settings.	Inverter não tem configurações.
+ 	Italic	Itálico
+-	Join us on Discord	Participe do nosso Discord
+ 	Justify all	Justificar tudo
+ 	Justify last centered	Justificar com a última linha centralizada
+ 	Justify last left	Justificar com a última linha à esquerda
+@@ -1700,7 +1695,6 @@
+ 	Apple Watch 45mm	Apple Watch 45mm
+ 	Aqua	Aqua
+ 	Art & Illustration	Arte e ilustração
+-	ArtCraft	ArtCraft
+ 	Background Eraser Tool	Ferramenta Borracha de plano de fundo
+ 	Bevel & Emboss	Chanfro e entalhe
+ 	Blend Mode	Modo de mesclagem
+@@ -1847,7 +1841,6 @@
+ 	Pen Tool	Ferramenta Caneta
+ 	Convert Point Tool	Ferramenta Converter ponto
+ 	Photo	Foto
+-	PhotoCraft website	Site do PhotoCraft
+ 	Picas	Paicas
+ 	Pillow Emboss	Entalhe almofadado
+ 	Pixel Replacement	Substituição de pixels
+@@ -3598,7 +3591,6 @@ layerLabel	No Color	Sem cor
+ 	Custom Pixel Aspect Ratio	Proporção de pixel personalizada
+ 	32-bit Preview Options	Opções de visualização de 32 bits
+ 	New Guide	Nova guia
+-	Join the ArtCraft Discord	Entrar no Discord do ArtCraft
+ 	Report an Issue	Relatar um problema
+ 	Load Files into Stack	Carregar arquivos em pilha
+ 	Statistics	Estatísticas
+diff --git a/crates/ui-egui/src/i18n/ru.tsv b/crates/ui-egui/src/i18n/ru.tsv
+index 60f3929..551235c 100644
+--- a/crates/ui-egui/src/i18n/ru.tsv
++++ b/crates/ui-egui/src/i18n/ru.tsv
+@@ -711,11 +711,8 @@
+ 	Toolbars	Панели инструментов
+ 	Hide All	Скрыть все
+ 	About PhotoCraft	О программе PhotoCraft
+-	PhotoCraft Website	Сайт PhotoCraft
+ 	PhotoCraft on GitHub	PhotoCraft на GitHub
+ 	Report an Issue…	Сообщить о проблеме…
+-	ArtCraft Website	Сайт ArtCraft
+-	Join the ArtCraft Discord…	Discord сообщества ArtCraft…
+ 	System Info…	Информация о системе…
+ 	Move	Перемещение
+ 	Marquee	Область
+@@ -1807,9 +1804,6 @@
+ 	Preserve Transparency	Сохранить прозрачность
+ 	Reverse	Обратить
+ 	Align with layer	По слою
+-	Join us on Discord	Мы в Discord
+-	PhotoCraft website	Сайт PhotoCraft
+-	ArtCraft	ArtCraft
+ 	GitHub	GitHub
+ 	No character style	Нет стиля символов
+ 	No author	Нет автора
+@@ -2219,7 +2213,6 @@
+ 	Delete tool preset	Удалить набор инструментов
+ 	Depth Jitter	Колебание глубины
+ 	Discontiguous	Несмежные пикселы
+-	Discord	Discord
+ 	Display P3	Display P3
+ 	Display Text	Показывать текст
+ 	Divide…	Деление…
+@@ -3966,8 +3959,6 @@ smartSvg	AI/PDF/EPS contents will be edited as SVG. Saving replaces the embedded
+ 	Iris Blur	Диафрагменное размытие
+ 	Ivy	Плющ
+ 	Jag	Зубчатость
+-	Join the ArtCraft Discord	Discord сообщества ArtCraft
+-	Join the ArtCraft Discord ({url})	Присоединиться к Discord ArtCraft ({url})
+ 	Keeps the current texture when switching presets.	Сохраняет текущую текстуру при смене набора.
+ 	Kernel	Ядро
+ 	Kerning: Metrics, Optical or a value in 1/1000 em (Alt+←/→ at the caret)	Кернинг: метрический, оптический или значение в 1/1000 em (Alt+←/→ у курсора)
+diff --git a/crates/ui-egui/src/i18n/sr.tsv b/crates/ui-egui/src/i18n/sr.tsv
+index 2ebc6c2..d2d493d 100644
+--- a/crates/ui-egui/src/i18n/sr.tsv
++++ b/crates/ui-egui/src/i18n/sr.tsv
+@@ -903,10 +903,7 @@
+ 	Tool Presets	Šabloni alatki
+ 	Tools	Alatke
+ 	About PhotoCraft	O programu PhotoCraft
+-	PhotoCraft Website	Veb-sajt PhotoCraft-a
+ 	PhotoCraft on GitHub	PhotoCraft na GitHub-u
+-	ArtCraft Website	Veb-sajt ArtCraft-a
+-	Join the ArtCraft Discord…	Pridružite se ArtCraft Discord zajednici…
+ 	Report an Issue…	Prijavi problem…
+ 	WIA Support…	WIA podrška…
+ 	Apply	Primeni
+@@ -1182,7 +1179,6 @@
+ 	Diffusion	Difuzija
+ 	Discard the embedded profile (don't color manage)	Odbaci ugrađeni profil (bez upravljanja bojama)
+ 	Discontiguous	Nesusedno
+-	Discord	Discord
+ 	Dismiss	Odbaci
+ 	Display P3	Display P3
+ 	Display Text	Tekst za prikaz
+@@ -1308,7 +1304,6 @@
+ 	Invert All	Invertuj sve
+ 	Invert has no settings.	Invertovanje nema podešavanja.
+ 	Italic	Kurziv
+-	Join us on Discord	Pridružite nam se na Discordu
+ 	Justify all	Obostrano poravnaj sve redove
+ 	Justify last centered	Obostrano, poslednji red centriran
+ 	Justify last left	Obostrano, poslednji red levo
+@@ -1713,7 +1708,6 @@
+ 	Apple Watch 45mm	Apple Watch 45 mm
+ 	Aqua	Akva
+ 	Art & Illustration	Umetnost i ilustracija
+-	ArtCraft	ArtCraft
+ 	Background Eraser Tool	Alatka gumica za pozadinu
+ 	Bevel & Emboss	Kosina i reljef
+ 	Blend Mode	Režim stapanja
+@@ -1862,7 +1856,6 @@
+ 	Pen Tool	Alatka pero
+ 	Convert Point Tool	Alatka za pretvaranje tačke
+ 	Photo	Fotografija
+-	PhotoCraft website	Veb-sajt PhotoCraft-a
+ 	Picas	Pike
+ 	Pillow Emboss	Jastučasti reljef
+ 	Pixel Replacement	Zamena piksela
+@@ -3617,7 +3610,6 @@ layerLabel	No Color	Bez boje
+ 	Custom Pixel Aspect Ratio	Prilagođeni odnos stranica piksela
+ 	32-bit Preview Options	Opcije 32-bitnog pregleda
+ 	New Guide	Nova vodilja
+-	Join the ArtCraft Discord	Pridružite se ArtCraft Discord zajednici
+ 	Report an Issue	Prijavi problem
+ 	Load Files into Stack	Učitaj datoteke u stek
+ 	Statistics	Statistika
+@@ -4170,7 +4162,6 @@ navigator	Zoom	Uvećanje
+ 	on	uključeno
+ 	off	isključeno
+ 	This adjustment ({key}) is kept as imported and can't be edited yet.	Ova korekcija ({key}) je zadržana onakva kakva je uvezena i još ne može da se uređuje.
+-	Join the ArtCraft Discord ({url})	Pridružite se ArtCraft Discord zajednici ({url})
+ 	{index} of {total}	{index} od {total}
+ 	{shortcut} assigned.	{shortcut} je dodeljena.
+ 	{shortcut} is already in use by {commands} and will be removed from it when you click OK.	{shortcut} već koristi {commands} i biće uklonjena odatle kada kliknete U redu.
+diff --git a/crates/ui-egui/src/i18n/sv.tsv b/crates/ui-egui/src/i18n/sv.tsv
+index b9c3721..f6ce251 100644
+--- a/crates/ui-egui/src/i18n/sv.tsv
++++ b/crates/ui-egui/src/i18n/sv.tsv
+@@ -543,11 +543,8 @@
+ 
+ # Help
+ 	About PhotoCraft	Om PhotoCraft
+-	PhotoCraft Website	PhotoCrafts webbplats
+ 	PhotoCraft on GitHub	PhotoCraft på GitHub
+ 	Report an Issue…	Rapportera ett problem…
+-	ArtCraft Website	ArtCrafts webbplats
+-	Join the ArtCraft Discord…	Gå med i ArtCraft på Discord…
+ 	System Info…	Systeminformation…
+ 
+ # Tools and options bar
+@@ -1695,9 +1692,6 @@
+ 	Preserve Transparency	Bevara genomskinlighet
+ 	Reverse	Omvänd
+ 	Align with layer	Justera efter lager
+-	Join us on Discord	Gå med i vår Discord
+-	PhotoCraft website	PhotoCrafts webbplats
+-	ArtCraft	ArtCraft
+ 	GitHub	GitHub
+ 	No character style	Inget teckenformat
+ 	No author	Ingen författare
+@@ -2122,7 +2116,6 @@
+ 	Delete tool preset	Ta bort verktygsförinställning
+ 	Depth Jitter	Djupvariation
+ 	Discontiguous	Ej sammanhängande
+-	Discord	Discord
+ 	Display P3	Display P3
+ 	Display Text	Visa text
+ 	Divide…	Dela…
+@@ -3950,8 +3943,6 @@ curves	Smooth	Jämna ut
+ 	Iris Blur	Irisoskärpa
+ 	Ivy	Murgröna
+ 	Jag	Taggig
+-	Join the ArtCraft Discord	Gå med i ArtCraft på Discord
+-	Join the ArtCraft Discord ({url})	Gå med i ArtCraft på Discord ({url})
+ 	Keeps the current texture when switching presets.	Behåller den aktuella texturen när du byter förinställning.
+ 	Kernel	Kärna
+ 	Kerning: Metrics, Optical or a value in 1/1000 em (Alt+←/→ at the caret)	Kerning: Metrik, Optisk eller ett värde i 1/1000 em (Alt+←/→ vid markören)
+diff --git a/crates/ui-egui/src/i18n/tr.tsv b/crates/ui-egui/src/i18n/tr.tsv
+index 007d756..45608e7 100644
+--- a/crates/ui-egui/src/i18n/tr.tsv
++++ b/crates/ui-egui/src/i18n/tr.tsv
+@@ -811,10 +811,7 @@
+ 	Tool Presets	Araç Ön Ayarları
+ 	Tools	Araçlar
+ 	About PhotoCraft	PhotoCraft Hakkında
+-	PhotoCraft Website	PhotoCraft Web Sitesi
+ 	PhotoCraft on GitHub	GitHub'da PhotoCraft
+-	ArtCraft Website	ArtCraft Web Sitesi
+-	Join the ArtCraft Discord…	ArtCraft Discord'una Katıl…
+ 	Report an Issue…	Sorun Bildir…
+ 	WIA Support…	WIA Desteği…
+ 	Apply	Uygula
+@@ -1090,7 +1087,6 @@
+ 	Diffusion	Difüzyon
+ 	Discard the embedded profile (don't color manage)	Gömülü profili atın (renk yönetimi yapmayın)
+ 	Discontiguous	Bitişik Değil
+-	Discord	Discord
+ 	Dismiss	Kapat
+ 	Display P3	Display P3
+ 	Display Text	Metni Görüntüle
+@@ -1223,7 +1219,6 @@
+ 	Invert All	Tümünü Ters Çevir
+ 	Invert has no settings.	Tersine çevirmenin hiçbir ayarı yoktur.
+ 	Italic	İtalik
+-	Join us on Discord	Discord'da bize katılın
+ 	Justify all	Tümünü iki yana yasla
+ 	Justify last centered	Son satır ortalı, iki yana yasla
+ 	Justify last left	Son satır sola yaslı, iki yana yasla
+@@ -1626,7 +1621,6 @@
+ 	Apple Watch 45mm	Apple Watch 45mm
+ 	Aqua	Turkuaz
+ 	Art & Illustration	Sanat ve İllüstrasyon
+-	ArtCraft	ArtCraft
+ 	Background Eraser Tool	Arka Plan Silgisi Aracı
+ 	Bevel & Emboss	Eğim ve Kabartma
+ 	Blend Mode	Karıştırma Modu
+@@ -1773,7 +1767,6 @@
+ 	Pen Tool	Kalem Aracı
+ 	Convert Point Tool	Nokta Dönüştürme Aracı
+ 	Photo	Fotoğraf
+-	PhotoCraft website	PhotoCraft web sitesi
+ 	Picas	Pikalar
+ 	Pillow Emboss	Yastık Kabartma
+ 	Pixel Replacement	Piksel Değiştirme
+@@ -3091,7 +3084,6 @@ cameraRaw	Color	Renk
+ 	Custom Pixel Aspect Ratio	Özel Piksel En Boy Oranı
+ 	32-bit Preview Options	32 bit Önizleme Seçenekleri
+ 	New Guide	Yeni Kılavuz
+-	Join the ArtCraft Discord	ArtCraft Discord'una Katıl
+ 	Report an Issue	Sorun Bildir
+ 	Load Files into Stack	Dosyaları Yığına Yükle
+ 	Statistics	İstatistikler
+diff --git a/crates/ui-egui/src/i18n/uk.tsv b/crates/ui-egui/src/i18n/uk.tsv
+index 68128b8..55812d4 100644
+--- a/crates/ui-egui/src/i18n/uk.tsv
++++ b/crates/ui-egui/src/i18n/uk.tsv
+@@ -681,11 +681,8 @@
+ 	Toolbars	Панелі інструментів
+ 	Hide All	Приховати все
+ 	About PhotoCraft	Про PhotoCraft
+-	PhotoCraft Website	Вебсайт PhotoCraft
+ 	PhotoCraft on GitHub	PhotoCraft на GitHub
+ 	Report an Issue…	Повідомити про проблему…
+-	ArtCraft Website	Вебсайт ArtCraft
+-	Join the ArtCraft Discord…	Приєднатися до Discord ArtCraft…
+ 	System Info…	Інформація про систему…
+ 	Move	Переміщення
+ 	Marquee	Прямокутне виділення
+@@ -1777,9 +1774,6 @@
+ 	Preserve Transparency	Зберігати прозорість
+ 	Reverse	Зворотний
+ 	Align with layer	Вирівняти за шаром
+-	Join us on Discord	Приєднуйтеся до нас у Discord
+-	PhotoCraft website	Вебсайт PhotoCraft
+-	ArtCraft	ArtCraft
+ 	GitHub	GitHub
+ 	No character style	Без стилю символів
+ 	No author	Автор відсутній
+@@ -2193,7 +2187,6 @@
+ 	Delete tool preset	Видалити набір інструмента
+ 	Depth Jitter	Коливання глибини
+ 	Discontiguous	Несуміжні
+-	Discord	Discord
+ 	Display P3	Display P3
+ 	Display Text	Показувати текст
+ 	Divide…	Розділити…
+@@ -3437,7 +3430,6 @@ cameraRaw	Masking	Маскування
+ 	Custom Pixel Aspect Ratio	Довільне співвідношення сторін пікселя
+ 	32-bit Preview Options	Параметри 32-бітного перегляду
+ 	New Guide	Нова напрямна
+-	Join the ArtCraft Discord	Приєднатися до Discord ArtCraft
+ 	Report an Issue	Повідомити про проблему
+ 	WIA Support	Підтримка WIA
+ 	Load Files into Stack	Завантажити файли у стос
+diff --git a/crates/ui-egui/src/i18n/vi.tsv b/crates/ui-egui/src/i18n/vi.tsv
+index d868ab0..60ff2fc 100644
+--- a/crates/ui-egui/src/i18n/vi.tsv
++++ b/crates/ui-egui/src/i18n/vi.tsv
+@@ -782,7 +782,6 @@
+ 	6-up	6 cửa sổ
+ 	About PhotoCraft	Giới thiệu PhotoCraft
+ 	Actions	Thao tác
+-	ArtCraft Website	Trang web ArtCraft
+ 	Brush Settings	Thiết lập cọ
+ 	Brushes	Cọ
+ 	Cascade	Xếp tầng
+@@ -802,7 +801,6 @@
+ 	Histogram	Histogram
+ 	History	Lịch sử
+ 	Info	Thông tin
+-	Join the ArtCraft Discord…	Tham gia Discord ArtCraft…
+ 	Layer Comps	Tổ hợp lớp
+ 	Lock Workspace	Khóa không gian làm việc
+ 	Match All	Đồng bộ tất cả
+@@ -823,7 +821,6 @@
+ 	Paths	Đường dẫn
+ 	Patterns	Họa tiết
+ 	PhotoCraft on GitHub	PhotoCraft trên GitHub
+-	PhotoCraft Website	Trang web PhotoCraft
+ 	Photography	Nhiếp ảnh
+ 	Pixel Art	Pixel Art
+ 	Pro Medium Gray Theme	Chủ đề Pro xám vừa
+@@ -2064,8 +2061,6 @@ colorRange	Invert	Đảo ngược
+ 	↑↓ navigate   {key} run   esc close	↑↓ điều hướng   {key} chạy   esc đóng
+ 	Tool	Công cụ
+ 	New document…	Tài liệu mới…
+-	Join us on Discord	Tham gia Discord
+-	PhotoCraft website	Trang web PhotoCraft
+ 	Anchor:	Neo:
+ 	Canvas extension color:	Màu mở rộng canvas:
+ layers	Fill	Độ tô
+@@ -2414,7 +2409,6 @@ layers	Fill:	Độ tô:
+ 	Add	Thêm
+ 	Appearance	Giao diện
+ shape	Appearance	Diện mạo
+-	ArtCraft	ArtCraft
+ 	Bottom	Dưới
+ 	Capture	Ghi lại
+ 	Change	Thay
+@@ -2423,7 +2417,6 @@ shape	Appearance	Diện mạo
+ 	current	hiện tại
+ 	Cycle Orientation	Đổi hướng khung
+ 	Difference	Hiệu
+-	Discord	Discord
+ 	Display P3	Display P3
+ 	GitHub	GitHub
+ 	Gray Gamma 2.2	Gray Gamma 2.2
+diff --git a/crates/ui-egui/src/i18n/zh-hans.tsv b/crates/ui-egui/src/i18n/zh-hans.tsv
+index d9b554a..5097b16 100644
+--- a/crates/ui-egui/src/i18n/zh-hans.tsv
++++ b/crates/ui-egui/src/i18n/zh-hans.tsv
+@@ -906,10 +906,7 @@
+ 	Tool Presets	工具预设
+ 	Tools	工具
+ 	About PhotoCraft	关于 PhotoCraft
+-	PhotoCraft Website	PhotoCraft 网站
+ 	PhotoCraft on GitHub	PhotoCraft 的 GitHub 页面
+-	ArtCraft Website	ArtCraft 网站
+-	Join the ArtCraft Discord…	加入 ArtCraft 的 Discord 社区…
+ 	Report an Issue…	报告问题…
+ 	WIA Support…	WIA 支持…
+ 	Apply	应用
+@@ -1215,7 +1212,6 @@
+ 	Diffusion	扩散
+ 	Discard the embedded profile (don't color manage)	丢弃嵌入的配置文件（不进行色彩管理）
+ 	Discontiguous	不连续
+-	Discord	Discord
+ 	Dismiss	关闭
+ 	Display P3	Display P3
+ 	Display Text	显示文字
+@@ -1351,7 +1347,6 @@
+ 	Invert All	全部反相
+ 	Invert has no settings.	反相没有可调整的设置。
+ 	Italic	斜体
+-	Join us on Discord	加入我们的 Discord 社区
+ 	Justify all	全部两端对齐
+ 	Justify last centered	两端对齐，末行居中
+ 	Justify last left	两端对齐，末行左对齐
+@@ -1769,7 +1764,6 @@
+ 	Apple Watch 45mm	Apple Watch 45mm
+ 	Aqua	水绿色
+ 	Art & Illustration	艺术与插画
+-	ArtCraft	ArtCraft
+ 	Background Eraser Tool	背景橡皮擦工具
+ 	Bevel & Emboss	斜面和浮雕
+ 	Blend Mode	混合模式
+@@ -1922,7 +1916,6 @@
+ 	Pen Tool	钢笔工具
+ 	Convert Point Tool	转换点工具
+ 	Photo	照片
+-	PhotoCraft website	PhotoCraft 网站
+ 	Picas	派卡
+ 	Pillow Emboss	枕状浮雕
+ 	Pixel Replacement	像素替换
+diff --git a/crates/ui-egui/src/i18n/zh-hant.tsv b/crates/ui-egui/src/i18n/zh-hant.tsv
+index 9379418..d647b5b 100644
+--- a/crates/ui-egui/src/i18n/zh-hant.tsv
++++ b/crates/ui-egui/src/i18n/zh-hant.tsv
+@@ -905,10 +905,7 @@
+ 	Tool Presets	工具預設集
+ 	Tools	工具
+ 	About PhotoCraft	關於 PhotoCraft
+-	PhotoCraft Website	PhotoCraft 網站
+ 	PhotoCraft on GitHub	GitHub 上的 PhotoCraft
+-	ArtCraft Website	ArtCraft 網站
+-	Join the ArtCraft Discord…	加入 ArtCraft Discord…
+ 	Report an Issue…	回報問題…
+ 	WIA Support…	WIA 支援…
+ 	Apply	套用
+@@ -1198,7 +1195,6 @@
+ 	Diffusion	擴散
+ 	Discard the embedded profile (don't color manage)	捨棄嵌入的描述檔 (不進行色彩管理)
+ 	Discontiguous	不連續
+-	Discord	Discord
+ 	Dismiss	關閉
+ 	Display P3	Display P3
+ 	Display Text	顯示文字
+@@ -1332,7 +1328,6 @@
+ 	Invert All	全部反轉
+ 	Invert has no settings.	負片效果沒有設定。
+ 	Italic	斜體
+-	Join us on Discord	加入我們的 Discord
+ 	Justify all	全部齊行
+ 	Justify last centered	最後一行置中齊行
+ 	Justify last left	最後一行靠左齊行
+@@ -1743,7 +1738,6 @@
+ 	Apple Watch 45mm	Apple Watch 45mm
+ 	Aqua	水藍色
+ 	Art & Illustration	藝術與插畫
+-	ArtCraft	ArtCraft
+ 	Background Eraser Tool	背景橡皮擦工具
+ 	Bevel & Emboss	斜角和浮雕
+ 	Blend Mode	混合模式
+@@ -1892,7 +1886,6 @@
+ 	Pen Tool	筆型工具
+ 	Convert Point Tool	轉換錨點工具
+ 	Photo	相片
+-	PhotoCraft website	PhotoCraft 網站
+ 	Picas	派卡
+ 	Pillow Emboss	枕狀浮雕
+ 	Pixel Replacement	像素取代
+diff --git a/crates/ui-egui/src/links.rs b/crates/ui-egui/src/links.rs
+index 2042d99..8940d4c 100644
+--- a/crates/ui-egui/src/links.rs
++++ b/crates/ui-egui/src/links.rs
+@@ -1,20 +1,14 @@
+-//! Community and project links: the Help menu, the About dialog, the start screen and the title
+-//! bar all open these. URLs follow the crafting-app pattern (`getartcraft.com/apps/<app>`,
+-//! `github.com/storytold/<app>`).
++//! Project links: the Help menu, the About dialog and the start screen open these.
+ 
+ use serde_json::{Value, json};
+ 
+ use crate::PhotocraftApp;
+ 
+-pub const DISCORD: &str = "https://discord.gg/artcraft";
+-pub const ARTCRAFT_WEBSITE: &str = "https://getartcraft.com";
+-pub const APP_PAGE: &str = "https://getartcraft.com/apps/photocraft";
+ pub const GITHUB: &str = "https://github.com/storytold/photocraft";
+ pub const ISSUES: &str = "https://github.com/storytold/photocraft/issues";
+ 
+ /// Help-menu link commands: (id, url). Labels live in `menus::UI_COMMANDS`.
+-pub const COMMANDS: &[(&str, &str)] =
+-    &[("help.discord", DISCORD), ("help.website", APP_PAGE), ("help.artcraftWebsite", ARTCRAFT_WEBSITE), ("help.github", GITHUB), ("help.reportIssue", ISSUES)];
++pub const COMMANDS: &[(&str, &str)] = &[("help.github", GITHUB), ("help.reportIssue", ISSUES)];
+ 
+ pub fn url_for(id: &str) -> Option<&'static str> {
+     COMMANDS.iter().find(|c| c.0 == id).map(|c| c.1)
+@@ -32,24 +26,15 @@ pub fn open(app: &mut PhotocraftApp, ctx: &egui::Context, url: &str) -> Value {
+     json!({"url": url})
+ }
+ 
+-/// The prominent "Join us on Discord" button.
+-pub fn discord_button(app: &mut PhotocraftApp, ui: &mut egui::Ui, min_width: f32) -> egui::Response {
+-    let r = crate::widgets::primary_button(ui, tl!("Join us on Discord"), min_width).on_hover_text(DISCORD);
+-    if r.clicked() {
+-        open(app, ui.ctx(), DISCORD);
+-    }
+-    r
+-}
+-
+-/// "PhotoCraft website · GitHub · ArtCraft" as links, centred. Clicks route through [`open`] (the
++/// "GitHub" as a link, centred. Clicks route through [`open`] (the
+ /// platform browser service) rather than `ui.hyperlink_to`, which uses the unreliable `ctx.open_url`.
+ pub fn link_row(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+     let t = crate::theme::Tokens::get(ui.ctx());
+-    let links = [(tl!("PhotoCraft website"), APP_PAGE), (tl!("GitHub"), GITHUB), (tl!("ArtCraft"), ARTCRAFT_WEBSITE)];
++    let links = [(tl!("GitHub"), GITHUB)];
+     let font = egui::FontId::proportional(12.5);
+     let sep = "  ·  ";
+     let width: f32 = links.iter().map(|(l, _)| ui.painter().layout_no_wrap((*l).into(), font.clone(), t.text).size().x).sum::<f32>()
+-        + 2.0 * ui.painter().layout_no_wrap(sep.into(), font.clone(), t.text).size().x;
++        + (links.len() - 1) as f32 * ui.painter().layout_no_wrap(sep.into(), font.clone(), t.text).size().x;
+     let mut clicked: Option<&str> = None;
+     ui.horizontal(|ui| {
+         ui.spacing_mut().item_spacing.x = 0.0;
+@@ -74,7 +59,7 @@ mod tests {
+ 
+     #[test]
+     fn links_open_through_the_platform_service() {
+-        // Issue #14: links (Help menu, Discord button, start-page links) must open in the browser.
++        // Issue #14: links (Help menu, start-page links) must open in the browser.
+         // They route through the `open_url` service rather than the unreliable `ctx.open_url`.
+         use std::sync::{Arc, Mutex};
+         let opened: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+@@ -93,9 +78,9 @@ mod tests {
+             crate::menus::invoke(&mut app, &ctx, id, json!({})).unwrap();
+             assert_eq!(opened.lock().unwrap().last().map(String::as_str), Some(*url), "{id}");
+         }
+-        // The direct open() helper (Discord button / start-page links) also uses it.
+-        open(&mut app, &ctx, DISCORD);
+-        assert_eq!(opened.lock().unwrap().last().map(String::as_str), Some(DISCORD));
++        // The direct open() helper (start-page links) also uses it.
++        open(&mut app, &ctx, GITHUB);
++        assert_eq!(opened.lock().unwrap().last().map(String::as_str), Some(GITHUB));
+     }
+ 
+     #[test]
+@@ -105,9 +90,6 @@ mod tests {
+         assert_eq!(
+             help,
+             [
+-                "help.discord",
+-                "help.website",
+-                "help.artcraftWebsite",
+                 "help.github",
+                 "help.reportIssue",
+                 "help.checkForUpdates",
+@@ -126,8 +108,6 @@ mod tests {
+         let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
+         let ctx = egui::Context::default();
+         for (id, url) in [
+-            ("help.discord", "https://discord.gg/artcraft"),
+-            ("help.website", "https://getartcraft.com/apps/photocraft"),
+             ("help.github", "https://github.com/storytold/photocraft"),
+         ] {
+             let r = crate::menus::invoke(&mut app, &ctx, id, serde_json::json!({})).unwrap();

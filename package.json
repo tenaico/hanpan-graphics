@@ -1,0 +1,11 @@
+{
+  "name": "hanpan-graphics",
+  "private": true,
+  "description": "Hanpan's patched web builds of PhotoCraft and VectorCraft (by the ArtCraft team)",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  }
+}

@@ -1,0 +1,227 @@
+diff --git a/apps/photocraft-web/src/web.rs b/apps/photocraft-web/src/web.rs
+index c9a734e..59f4270 100644
+--- a/apps/photocraft-web/src/web.rs
++++ b/apps/photocraft-web/src/web.rs
+@@ -62,6 +62,8 @@ pub fn start() {
+         };
+         let q = query();
+         let force_cpu = q.contains("cpu");
++        // Hanpan: `?embedded=hanpan`, the host page owns the files (photocraft_ui_egui::embedded)
++        let embedded = photocraft_ui_egui::embedded::requested(&q);
+         let mut options = eframe::WebOptions::default();
+         photocraft_ui_egui::gpu_canvas::use_adapter_limits(&mut options.wgpu_options.wgpu_setup);
+         if q.contains("webgl")
+@@ -94,7 +96,8 @@ pub fn start() {
+                     let (session, warnings) = crate::preset_bridge::session(presets.clone());
+                     preset_warnings.extend(warnings);
+                     let drag = listen_drag(&pen_target);
+-                    let mut app = PhotocraftApp::new(session, services(inbox.clone(), place_inbox.clone(), drag_pos_service(pen_target.clone(), drag)));
++                    let services = Services { embedded, ..services(inbox.clone(), place_inbox.clone(), drag_pos_service(pen_target.clone(), drag)) };
++                    let mut app = PhotocraftApp::new(session, services);
+                     // `window.photocraft`: the page's control channel (crate::api).
+                     let (control_tx, control_rx) = std::sync::mpsc::channel();
+                     crate::api::connect(control_tx, inbox.clone(), cc.egui_ctx.clone());
+@@ -363,12 +366,18 @@ impl eframe::App for WebShell {
+             // Decided now, where the drop landed: on the document's canvas the files are placed
+             // as layers (as on the desktop), elsewhere opened.
+             let places = self.app.dropped_on_canvas(ctx, &names);
++            // Hanpan: embedded mode opens no second document; a file dropped off the canvas is left
++            let opens = !self.app.services.embedded || self.app.session.active().is_none();
+             let files: Vec<_> = dropped.into_iter().zip(names).zip(places).collect();
+             let (inbox, place_inbox) = (self.inbox.clone(), self.place_inbox.clone());
+             let ctx = ctx.clone();
+             // One after another, so they open or place in the order they were dropped.
+             wasm_bindgen_futures::spawn_local(async move {
+                 for ((f, name), place) in files {
++                    if !place && !opens {
++                        log::info!("embedded: not opening dropped {name}");
++                        continue;
++                    }
+                     match f.bytes_async().await {
+                         Ok(bytes) => {
+                             let queue = if place { &place_inbox } else { &inbox };
+diff --git a/crates/ui-egui/src/canvas/start_screen.rs b/crates/ui-egui/src/canvas/start_screen.rs
+index 0229079..6c749c9 100644
+--- a/crates/ui-egui/src/canvas/start_screen.rs
++++ b/crates/ui-egui/src/canvas/start_screen.rs
+@@ -46,7 +46,13 @@ pub(super) fn start_screen(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+             ui.label(egui::RichText::new(tl!("Create a new document or open an existing file.")).color(t.text_dim).size(14.0));
+             ui.add_space(22.0);
+             let (mut new_clicked, mut open_clicked) = (false, false);
+-            if side_by_side {
++            if app.services.embedded {
++                // Hanpan: embedded mode opens no files (`crate::embedded`), so New stands alone.
++                ui.horizontal(|ui| {
++                    ui.add_space(((card.width() - button_width) / 2.0).max(0.0));
++                    new_clicked = crate::widgets::primary_button(ui, &new_label, button_width).clicked();
++                });
++            } else if side_by_side {
+                 ui.horizontal(|ui| {
+                     ui.add_space(((card.width() - 2.0 * button_width - HOME_BUTTON_GAP) / 2.0).max(0.0));
+                     ui.spacing_mut().item_spacing.x = HOME_BUTTON_GAP;
+diff --git a/crates/ui-egui/src/control/dispatch.rs b/crates/ui-egui/src/control/dispatch.rs
+index 262cd9d..ff67f22 100644
+--- a/crates/ui-egui/src/control/dispatch.rs
++++ b/crates/ui-egui/src/control/dispatch.rs
+@@ -33,7 +33,18 @@ fn engine_methods(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlReq
+     Some(match req.method.as_str() {
+         "ui.context.choose" => context_choose(app, ctx, &req.params),
+         "engine.execute" | "ui.menu.invoke" => execute_command(app, ctx, req),
+-        "engine.commands" => wrap(app.run("command.list", json!({}))),
++        "engine.commands" => wrap(app.run("command.list", json!({})).map(|mut list| {
++            // Hanpan: list what embedded mode turns off as off
++            if app.services.embedded
++                && let Some(items) = list.as_array_mut()
++            {
++                let has_document = app.session.active().is_some();
++                for item in items.iter_mut().filter(|i| i["id"].as_str().is_some_and(|id| crate::embedded::blocks(id, has_document))) {
++                    item["enabled"] = json!(false);
++                }
++            }
++            list
++        })),
+         // Background jobs (#210): running ones with progress, then the last few that ended.
+         "jobs.list" => wrap(app.session.execute("jobs.list", json!({})).map_err(|e| e.to_string())),
+         "jobs.cancel" => jobs_cancel(app, &req.params),
+diff --git a/crates/ui-egui/src/embedded.rs b/crates/ui-egui/src/embedded.rs
+new file mode 100644
+index 0000000..6097ab2
+--- /dev/null
++++ b/crates/ui-egui/src/embedded.rs
+@@ -0,0 +1,53 @@
++//! Hanpan: embedded mode (`?embedded=hanpan` in the page address). The host page owns the files:
++//! it hands PhotoCraft the document and takes the saves, so Open, Open Recent, Close and Close All
++//! are off, and New only makes the first document (from the start screen). Save, Save As and
++//! Export stay as they are. The page API's engine commands are not gated: the host drives them.
++
++/// Does the page query (`location.search`, with or without its `?`) ask for embedded mode?
++pub fn requested(query: &str) -> bool {
++    query.trim_start_matches('?').split('&').any(|kv| kv == "embedded=hanpan")
++}
++
++/// Is command `id` off in embedded mode, with or without a document open?
++pub fn blocks(id: &str, has_document: bool) -> bool {
++    match id {
++        "file.open" | "file.openAs" | "file.close" | "file.closeAll" | "file.closeOthers" | "file.clearRecent" | "file.removeRecent" => true,
++        "file.new" | "file.newFromClipboard" => has_document,
++        id => id.starts_with("file.openRecent."),
++    }
++}
++
++/// Is command `id` gone from the menus in embedded mode (off whatever the documents)?
++pub fn hides(id: &str) -> bool {
++    blocks(id, false)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn the_flag_is_read_among_other_params() {
++        assert!(requested("?embedded=hanpan"));
++        assert!(requested("?lang=ko&embedded=hanpan"));
++        assert!(requested("embedded=hanpan&webgl"));
++        assert!(!requested(""));
++        assert!(!requested("?embedded=other"));
++        assert!(!requested("?notembedded=hanpan"));
++        assert!(!requested("?embedded=hanpanx"));
++    }
++
++    #[test]
++    fn open_and_close_are_off_and_new_only_makes_the_first_document() {
++        for id in ["file.open", "file.openAs", "file.openRecent.0", "file.close", "file.closeAll"] {
++            assert!(blocks(id, false) && blocks(id, true), "{id}");
++            assert!(hides(id), "{id}");
++        }
++        assert!(!blocks("file.new", false));
++        assert!(blocks("file.new", true));
++        assert!(!hides("file.new"));
++        for id in ["file.save", "file.saveAs", "file.export.exportAs", "file.export.quickExportAsPng"] {
++            assert!(!blocks(id, true), "{id}");
++        }
++    }
++}
+diff --git a/crates/ui-egui/src/file_dialog.rs b/crates/ui-egui/src/file_dialog.rs
+index bddc679..dc06bf5 100644
+--- a/crates/ui-egui/src/file_dialog.rs
++++ b/crates/ui-egui/src/file_dialog.rs
+@@ -242,6 +242,9 @@ impl PhotocraftApp {
+ 
+     /// File › Open: opens every chosen file, reporting each failure (see [`Self::open_paths`]).
+     pub fn open_dialog_file(&mut self) -> Result<Value, String> {
++        if self.services.embedded {
++            return Err("file.open is unavailable here".into());
++        }
+         let initial_dir = last_used_dir(&self.ui.recent_files);
+         self.ask_file(FileDialogRequest::Open { multiple: true, initial_dir, extensions: None }, |app, answer| {
+             match answer {
+diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
+index 5cb1ef3..869a7e4 100644
+--- a/crates/ui-egui/src/lib.rs
++++ b/crates/ui-egui/src/lib.rs
+@@ -29,6 +29,8 @@ pub mod canvas;
+ pub mod control;
+ pub mod dialogs;
+ pub mod dock;
++// Hanpan: `?embedded=hanpan`, the host page owns the files
++pub mod embedded;
+ pub mod file_dialog;
+ pub mod file_open;
+ pub mod frame_stages;
+diff --git a/crates/ui-egui/src/menus/invoke.rs b/crates/ui-egui/src/menus/invoke.rs
+index a089803..d90e51c 100644
+--- a/crates/ui-egui/src/menus/invoke.rs
++++ b/crates/ui-egui/src/menus/invoke.rs
+@@ -45,6 +45,9 @@ pub fn invoke(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, params: Va
+     {
+         authorize(id, &params)?;
+     }
++    if app.services.embedded && crate::embedded::blocks(id, app.session.active().is_some()) {
++        return Err(format!("{id} is unavailable here"));
++    }
+     if crate::discard_ui::intercept(app, id, &params) {
+         return Ok(Value::Null);
+     }
+diff --git a/crates/ui-egui/src/menus/items.rs b/crates/ui-egui/src/menus/items.rs
+index 37944cc..d326e8f 100644
+--- a/crates/ui-egui/src/menus/items.rs
++++ b/crates/ui-egui/src/menus/items.rs
+@@ -241,6 +241,10 @@ pub fn menu_items(app: &PhotocraftApp) -> Vec<MenuItem> {
+         item.label = "Release Clipping Mask".into();
+         item.enabled = is_enabled(app, &item.id);
+     }
++    // Hanpan: embedded mode hides File › Open, Open Recent, Close and Close All (`crate::embedded`).
++    if app.services.embedded {
++        items.retain(|i| !crate::embedded::hides(&i.id) && i.path.get(1).map(String::as_str) != Some("Open Recent"));
++    }
+     items
+ }
+ 
+diff --git a/crates/ui-egui/src/menus/state.rs b/crates/ui-egui/src/menus/state.rs
+index c932ca0..d53461e 100644
+--- a/crates/ui-egui/src/menus/state.rs
++++ b/crates/ui-egui/src/menus/state.rs
+@@ -3,6 +3,9 @@ use super::items::MenuItem;
+ use super::{DOCUMENT_ITEM, PhotocraftApp, Value};
+ 
+ pub fn is_enabled(app: &PhotocraftApp, id: &str) -> bool {
++    if app.services.embedded && crate::embedded::blocks(id, app.session.active().is_some()) {
++        return false;
++    }
+     if id == "layer.selectUnderCursor" {
+         return app.session.active().is_some() && app.drag.is_none() && app.brush_resize.is_none();
+     }
+diff --git a/crates/ui-egui/src/services.rs b/crates/ui-egui/src/services.rs
+index 7f05fdc..40a5cc4 100644
+--- a/crates/ui-egui/src/services.rs
++++ b/crates/ui-egui/src/services.rs
+@@ -402,6 +402,8 @@ pub type RightButtonDownFn = Box<dyn Fn() -> bool + Send + Sync>;
+ /// I/O dependencies.
+ #[derive(Default)]
+ pub struct Services {
++    /// Hanpan: embedded in a host page that owns the files (`crate::embedded`).
++    pub embedded: bool,
+     /// Explicit interactive SVG smart-object editing; unavailable in browser and automation.
+     pub open_external_svg: Option<OpenExternalSvgFn>,
+     /// User-initiated desktop/browser pixel sampling.

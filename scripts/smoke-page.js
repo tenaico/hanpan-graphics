@@ -112,6 +112,87 @@
       : ok(`first ${JSON.stringify(first).slice(0, 80)}; second without a fallback warning`)
   }
 
+
+  // Hanpan embedded mode (?embedded=hanpan): the host owns files, so Open, Open Recent, Close and
+  // Close All are off, and New only makes the first document. Ids are the ones commands() lists.
+  const EMBED_IDS = {
+    // PhotoCraft's commands() lists engine commands: File › Open and Open Recent are UI-only there
+    photocraft: { new: ['file.new'], off: ['file.openAs', 'file.close', 'file.closeAll'] },
+    vectorcraft: {
+      new: ['file.new', 'file.newDialog', 'file.newWithoutDialog'],
+      off: ['file.open', 'file.openRecent1', 'file.close', 'file.closeAll'],
+    },
+  }
+  // the menus show no Open, Open Recent, Close or Close All they would run (`ui.menu.list`)
+  const menuOpenClose = async (api) => {
+    const items = await api.request('ui.menu.list', {})
+    const on = items.filter((i) => i.enabled && /^file\.(open|openAs|openRecent.*|close|closeAll)$/.test(i.id ?? i.command ?? ''))
+    return on.map((i) => i.id ?? i.command)
+  }
+  const enabledOf = (cmds, ids) => Object.fromEntries(ids.map((id) => [id, cmds.find((c) => c.id === id)?.enabled]))
+  checks.embedded = async ({ global }) => {
+    const api = await waitFor(() => window[global], 60000)
+    if (!api) return fail(`no window.${global}`)
+    if (!/(^|[?&])embedded=hanpan(&|$)/.test(location.search)) return fail(`no embedded=hanpan in ${location.search}`)
+    const ids = EMBED_IDS[global]
+    const docs = async () => {
+      const i = await api.inspect()
+      return (i.documents ?? i.session?.documents ?? []).length
+    }
+    // a document left by an earlier check would hide the start state
+    if ((await docs()) !== 0) return fail(`a document is already open (${await docs()})`)
+    const before = enabledOf(await api.commands(), [...ids.new, ...ids.off])
+    const bad = (m) => fail(`${m}; before=${JSON.stringify(before)}`)
+    const missing = Object.entries(before).filter(([, e]) => e === undefined).map(([id]) => id)
+    if (missing.length) return bad(`not in commands(): ${missing.join(', ')}`)
+    if (!ids.new.every((id) => before[id] === true)) return bad('New is not enabled at the start')
+    if (!ids.off.every((id) => before[id] === false)) return bad('Open/Close is enabled')
+    const menuBefore = await menuOpenClose(api)
+    if (menuBefore.length) return fail(`menu items on at the start: ${menuBefore.join(', ')}`)
+    await newDocument(api, global)
+    if ((await docs()) !== 1) return bad(`documents after New: ${await docs()}`)
+    const after = enabledOf(await api.commands(), [...ids.new, ...ids.off])
+    if (!Object.values(after).every((e) => e === false)) return fail(`with a document: ${JSON.stringify(after)}`)
+    const menuAfter = await menuOpenClose(api)
+    if (menuAfter.length) return fail(`menu items on with a document: ${menuAfter.join(', ')}`)
+    return ok(`new ${ids.new.join('/')} on→off; ${ids.off.join('/')} off; menus too`)
+  }
+  checks['embedded-with-lang'] = async (ctx) => {
+    if (!/(^|[?&])lang=/.test(location.search)) return fail(`no lang= in ${location.search}`)
+    return checks.embedded(ctx)
+  }
+
+  // a save through the page API is captured and leaves the document clean (not modified)
+  checks['save-clean'] = async ({ global }) => {
+    const api = await waitFor(() => window[global], 60000)
+    if (!api) return fail(`no window.${global}`)
+    api.captureDownloads(true)
+    const docState = async () => {
+      const i = await api.inspect()
+      if (global === 'photocraft') {
+        const s = i.session ?? {}
+        return s.documents?.[s.active]
+      }
+      return i.documents?.[i.activeDocument]
+    }
+    // embedded mode keeps the document an earlier check made: New is off then
+    if (!(await docState())) await newDocument(api, global)
+    const edit =
+      global === 'photocraft'
+        ? await api.execute('edit.fillForeground', {})
+        : await api.execute('shape.rectangle', { x: 20, y: 20, width: 120, height: 80 })
+    const before = await docState()
+    if (!before?.dirty) return fail(`not modified after the edit: ${JSON.stringify(before)} edit=${JSON.stringify(edit).slice(0, 200)}`)
+    const name = global === 'photocraft' ? 'save-clean.psd' : 'save-clean.svg'
+    const saved = await api.request('app.save', global === 'photocraft' ? { path: name } : { path: name, wait: true })
+    await sleep(1500)
+    const hit = (await api.files()).find((f) => f.path.endsWith(name))
+    if (!hit) return fail(`no captured ${name}; save=${JSON.stringify(saved)} files=${JSON.stringify(await api.files())}`)
+    const after = await docState()
+    if (after?.dirty !== false) return fail(`still modified after the save: ${JSON.stringify(after)} save=${JSON.stringify(saved)}`)
+    return ok(`${hit.path} ${hit.size} bytes; dirty ${before.dirty}→${after.dirty}`)
+  }
+
   window.__smoke = {
     async run(name, ctx) {
       const check = checks[name]

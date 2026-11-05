@@ -1,0 +1,203 @@
+diff --git a/apps/vectorcraft-web/src/web.rs b/apps/vectorcraft-web/src/web.rs
+index 859d41e..3d3693c 100644
+--- a/apps/vectorcraft-web/src/web.rs
++++ b/apps/vectorcraft-web/src/web.rs
+@@ -121,6 +121,8 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
+                 host.pasted.borrow_mut().ctx = Some(ctx.clone());
+                 let stylus = host.pointers.borrow().stylus();
+                 let services = services(host.inbox.clone(), host.place_inbox.clone(), ctx.clone(), host.locks.clone(), stylus);
++                // Hanpan: `?embedded=hanpan`, the host page owns the files (vectorcraft_ui_egui::embedded)
++                let services = Services { embedded: vectorcraft_ui_egui::embedded::requested(&query()), ..services };
+                 let app = match taken.borrow_mut().take() {
+                     Some(mut app) => {
+                         // The old services asked the old context for frames.
+@@ -402,6 +404,11 @@ impl eframe::App for WebShell {
+                 for f in dropped {
+                     let name = f.path().file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "dropped".into());
+                     let target = app.drop_target(&name, pos, shift);
++                    // Hanpan: embedded mode opens no second document; a file that would open is left
++                    if matches!(target, DropTarget::Open) && app.services.embedded && app.session.active().is_some() {
++                        log::info!("embedded: not opening dropped {name}");
++                        continue;
++                    }
+                     let (inbox, place_inbox, repaint) = (self.host.inbox.clone(), self.host.place_inbox.clone(), ctx.clone());
+                     wasm_bindgen_futures::spawn_local(async move {
+                         match f.bytes_async().await {
+diff --git a/crates/ui-egui/src/canvas/home.rs b/crates/ui-egui/src/canvas/home.rs
+index 2987a03..bdbabdc 100644
+--- a/crates/ui-egui/src/canvas/home.rs
++++ b/crates/ui-egui/src/canvas/home.rs
+@@ -33,12 +33,17 @@ fn home_content(app: &mut VectorcraftApp, ui: &mut Ui) {
+         if widgets::primary_button(ui, tl!("New file")).clicked() {
+             app.run("file.newDialog", json!({})).ok();
+         }
+-        ui.add_space(8.0);
+-        if widgets::secondary_button(ui, tl!("Open")).clicked() {
+-            app.run("file.open", json!({})).ok();
++        // Hanpan: embedded mode opens no files (`crate::embedded`)
++        if !app.services.embedded {
++            ui.add_space(8.0);
++            if widgets::secondary_button(ui, tl!("Open")).clicked() {
++                app.run("file.open", json!({})).ok();
++            }
+         }
+     });
+-    recent(app, ui);
++    if !app.services.embedded {
++        recent(app, ui);
++    }
+     ui.add_space(28.0);
+     ui.label(egui::RichText::new(tl!("Quickly start a new file")).font(theme::semibold(14.0)).color(t.text));
+     ui.add_space(10.0);
+diff --git a/crates/ui-egui/src/chrome/tabs.rs b/crates/ui-egui/src/chrome/tabs.rs
+index cd0fad1..a8824b9 100644
+--- a/crates/ui-egui/src/chrome/tabs.rs
++++ b/crates/ui-egui/src/chrome/tabs.rs
+@@ -115,7 +115,8 @@ pub fn doc_tabs(app: &mut VectorcraftApp, ui: &mut Ui) {
+             });
+         });
+     }
+-    if let Some(i) = close {
++    // Hanpan: embedded mode closes no documents (`crate::embedded`)
++    if let Some(i) = close.filter(|_| !app.services.embedded) {
+         if let Err(e) = crate::unsaved::close(app, i) {
+             app.status(e);
+         }
+diff --git a/crates/ui-egui/src/control.rs b/crates/ui-egui/src/control.rs
+index c374b62..fe35b4c 100644
+--- a/crates/ui-egui/src/control.rs
++++ b/crates/ui-egui/src/control.rs
+@@ -162,6 +162,13 @@ fn wrap(r: Result<Value, String>) -> Outcome {
+ 
+ pub fn all_commands(app: &VectorcraftApp) -> Value {
+     let mut v: Vec<Value> = app.session.commands().into_iter().map(|c| serde_json::to_value(c).unwrap_or_default()).collect();
++    // Hanpan: list what embedded mode turns off as off
++    if app.services.embedded {
++        let has_document = app.session.active().is_some();
++        for c in v.iter_mut().filter(|c| c["id"].as_str().is_some_and(|id| crate::embedded::blocks(id, has_document))) {
++            c["enabled"] = json!(false);
++        }
++    }
+     for (id, label, sc, params) in crate::menus::UI_COMMANDS {
+         v.push(json!({"id": id, "label": label, "shortcut": sc, "params": params, "enabled": crate::menus::enabled(app, id), "ui": true}));
+     }
+diff --git a/crates/ui-egui/src/embedded.rs b/crates/ui-egui/src/embedded.rs
+new file mode 100644
+index 0000000..206e5f8
+--- /dev/null
++++ b/crates/ui-egui/src/embedded.rs
+@@ -0,0 +1,53 @@
++//! Hanpan: embedded mode (`?embedded=hanpan` in the page address). The host page owns the files:
++//! it hands VectorCraft the document and takes the saves, so Open, Open Recent, Close and Close
++//! All are off, and New only makes the first document (from the Home screen). Save, Save As and
++//! Export stay as they are. The page API (`app.open`, `app.save`) is not gated: the host drives it.
++
++/// Does the page query (`location.search`, with or without its `?`) ask for embedded mode?
++pub fn requested(query: &str) -> bool {
++    query.trim_start_matches('?').split('&').any(|kv| kv == "embedded=hanpan")
++}
++
++/// Is command `id` off in embedded mode, with or without a document open?
++pub fn blocks(id: &str, has_document: bool) -> bool {
++    match id {
++        "file.open" | "file.close" | "file.closeAll" | "file.clearRecent" => true,
++        "file.new" | "file.newDialog" | "file.newWithoutDialog" | "file.newFromTemplate" => has_document,
++        id => id.starts_with("file.openRecent"),
++    }
++}
++
++/// Is command `id` gone from the menus in embedded mode (off whatever the documents)?
++pub fn hides(id: &str) -> bool {
++    blocks(id, false)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn the_flag_is_read_among_other_params() {
++        assert!(requested("?embedded=hanpan"));
++        assert!(requested("?lang=ko&embedded=hanpan"));
++        assert!(requested("embedded=hanpan&webgl"));
++        assert!(!requested(""));
++        assert!(!requested("?embedded=other"));
++        assert!(!requested("?notembedded=hanpan"));
++        assert!(!requested("?embedded=hanpanx"));
++    }
++
++    #[test]
++    fn open_and_close_are_off_and_new_only_makes_the_first_document() {
++        for id in ["file.open", "file.openRecent1", "file.openRecent30", "file.close", "file.closeAll"] {
++            assert!(blocks(id, false) && blocks(id, true), "{id}");
++            assert!(hides(id), "{id}");
++        }
++        for id in ["file.new", "file.newDialog", "file.newWithoutDialog"] {
++            assert!(!blocks(id, false) && blocks(id, true) && !hides(id), "{id}");
++        }
++        for id in ["file.save", "file.saveAs", "file.exportAs", "file.export.png", "file.export.svg"] {
++            assert!(!blocks(id, true), "{id}");
++        }
++    }
++}
+diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
+index de33cfc..48410bb 100644
+--- a/crates/ui-egui/src/lib.rs
++++ b/crates/ui-egui/src/lib.rs
+@@ -35,6 +35,8 @@ pub mod cursors;
+ mod custom_toolbars;
+ pub mod dialogs;
+ pub mod dock;
++// Hanpan: `?embedded=hanpan`, the host page owns the files
++pub mod embedded;
+ mod edit_toolbar;
+ pub mod export_progress;
+ pub mod find_font;
+diff --git a/crates/ui-egui/src/menus/invoke.rs b/crates/ui-egui/src/menus/invoke.rs
+index c12915e..9d3af23 100644
+--- a/crates/ui-egui/src/menus/invoke.rs
++++ b/crates/ui-egui/src/menus/invoke.rs
+@@ -126,7 +126,7 @@ pub(crate) fn graph_dialog(app: &mut VectorcraftApp, id: &str) -> Result<Value,
+ }
+ 
+ pub fn invoke(app: &mut VectorcraftApp, id: &str, p: Value) {
+-    if waits_for_ime(app, id) {
++    if waits_for_ime(app, id) || (app.services.embedded && crate::embedded::blocks(id, app.session.active().is_some())) {
+         return;
+     }
+     if SUBJECT_COMMANDS.contains(&id)
+diff --git a/crates/ui-egui/src/menus/state.rs b/crates/ui-egui/src/menus/state.rs
+index 26904fc..9fcf470 100644
+--- a/crates/ui-egui/src/menus/state.rs
++++ b/crates/ui-egui/src/menus/state.rs
+@@ -135,7 +135,7 @@ fn swapped_out(app: &VectorcraftApp, id: &str) -> bool {
+ /// another stands in for ([`swapped_out`]).
+ pub fn shown_state(app: &VectorcraftApp, id: &str, p: &Value) -> Option<(bool, Option<bool>)> {
+     let en = enabled(app, id);
+-    if (!en && hidden_when_disabled(id)) || swapped_out(app, id) {
++    if (!en && hidden_when_disabled(id)) || swapped_out(app, id) || (app.services.embedded && crate::embedded::hides(id)) {
+         return None;
+     }
+     Some((en, checked(app, id, p)))
+@@ -180,7 +180,7 @@ pub(super) fn has_subject(app: &VectorcraftApp) -> bool {
+ /// Can command `id` run now? An engine command asks the engine, a UI command the app's state;
+ /// none that would act on text an input method is still composing.
+ pub fn enabled(app: &VectorcraftApp, id: &str) -> bool {
+-    if waits_for_ime(app, id) {
++    if waits_for_ime(app, id) || (app.services.embedded && crate::embedded::blocks(id, app.session.active().is_some())) {
+         return false;
+     }
+     if SUBJECT_COMMANDS.contains(&id) {
+diff --git a/crates/ui-egui/src/services.rs b/crates/ui-egui/src/services.rs
+index 45f363e..d903283 100644
+--- a/crates/ui-egui/src/services.rs
++++ b/crates/ui-egui/src/services.rs
+@@ -68,6 +68,8 @@ pub type RevealFn = Box<dyn FnMut(&str) -> Result<(), String>>;
+ /// Platform services injected by the host app (desktop or web).
+ #[derive(Default)]
+ pub struct Services {
++    /// Hanpan: embedded in a host page that owns the files (`crate::embedded`).
++    pub embedded: bool,
+     /// Show an open dialog; returns a path.
+     pub pick_open: Option<PickOpen>,
+     /// Show a save dialog (suggested name, folder, file types); returns a path.

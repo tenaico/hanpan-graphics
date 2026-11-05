@@ -4,3 +4,4 @@ Built from VectorCraft (https://github.com/storytold/vectorcraft), by the ArtCra
 
 - Korean text: NanumGothic Regular (OFL-1.1, from craft-fonts) added to the fonts the web build fetches at startup (crates/text/web-fonts.txt), so Hangul has a fallback.
 - Brand: the ArtCraft name, the Discord and getartcraft.com links and their menu entries are removed (code and translations); About carries the plain credit "Based on VectorCraft by the ArtCraft team (MIT or Apache-2.0), modified for Hanpan."
+- Embedded mode: with `embedded=hanpan` in the page address, Open, Open Recent, Close and Close All are off and hidden, New works only until the first document exists, and a file dropped off the canvas while a document is open is not opened as another document; without it the app is unchanged.

@@ -216,6 +216,48 @@
     return ok(`${hit.path} ${hit.size} bytes; dirty ${before.dirty}→${after.dirty}`)
   }
 
+  // PhotoCraft: app.exportImage hands back the composite image without touching the document,
+  // the status line, the notices or the captured downloads
+  checks['export-image'] = async ({ global }) => {
+    const api = await waitFor(() => window[global], 60000)
+    if (!api) return fail(`no window.${global}`)
+    api.captureDownloads(true)
+    const look = async () => {
+      const i = await api.inspect()
+      const s = i.session ?? {}
+      const d = s.documents?.[s.active]
+      return { dirty: d?.dirty, status: i.status ?? i.ui?.status, notices: (i.notices ?? i.ui?.notices ?? []).length, files: (await api.files()).length }
+    }
+    if (!(await api.inspect()).session?.documents?.length) await newDocument(api, global)
+    await api.execute('edit.fillForeground', {})
+    const before = await look()
+    const results = []
+    for (const [params, want] of [
+      [{ format: 'png' }, { mime: [0x89, 0x50, 0x4e, 0x47], w: 600, h: 300 }],
+      [{ format: 'jpeg', quality: 80, maxSide: 200 }, { mime: [0xff, 0xd8, 0xff], w: 200, h: 100 }],
+    ]) {
+      let r
+      try {
+        r = await api.request('app.exportImage', params)
+      } catch (e) {
+        return fail(`${JSON.stringify(params)} rejected: ${e && e.message}`)
+      }
+      if (typeof r?.dataBase64 !== 'string') return fail(`${JSON.stringify(params)}: no dataBase64 in ${JSON.stringify(r).slice(0, 200)}`)
+      const head = [...atob(r.dataBase64.slice(0, 8))].map((c) => c.charCodeAt(0))
+      if (!want.mime.every((b, i) => head[i] === b)) return fail(`${JSON.stringify(params)}: bytes ${head}`)
+      if (r.width !== want.w || r.height !== want.h) return fail(`${JSON.stringify(params)}: ${r.width}x${r.height}, want ${want.w}x${want.h}`)
+      results.push(`${params.format} ${r.width}x${r.height} ${Math.round((r.dataBase64.length * 3) / 4)}B`)
+    }
+    try {
+      await api.request('app.exportImage', { format: 'gif' })
+      return fail('format gif was accepted')
+    } catch {}
+    await sleep(500)
+    const after = await look()
+    if (JSON.stringify(after) !== JSON.stringify(before)) return fail(`state changed: ${JSON.stringify(before)} → ${JSON.stringify(after)}`)
+    return ok(`${results.join('; ')}; state unchanged ${JSON.stringify(after)}`)
+  }
+
   window.__smoke = {
     async run(name, ctx) {
       const check = checks[name]

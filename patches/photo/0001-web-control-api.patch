@@ -437,3 +437,180 @@ index 024888c..ea83676 100644
      let js = |e: wasm_bindgen::JsValue| format!("{e:?}");
      let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "photocraft".into());
      let window = web_sys::window().ok_or("no window")?;
+diff --git a/crates/ui-egui/src/control.rs b/crates/ui-egui/src/control.rs
+index e979d3d..a78705a 100644
+--- a/crates/ui-egui/src/control.rs
++++ b/crates/ui-egui/src/control.rs
+@@ -29,6 +29,8 @@
+ //!   because occluded macOS windows stop rendering
+ //! - `ui.focus`: bring the main window to the front
+ //! - `app.open {path}` / `app.save {path}`: relative file I/O under the automation roots; reply with `warnings`
++//! - `app.exportImage {format?, maxSide?, quality?}` (Hanpan): the active document's composite as
++//!   PNG or JPEG bytes; writes nothing and leaves the document, status line and notices alone
+ //! - `app.quit`
+ //! - `jobs.list` / `jobs.cancel {job?}`: background jobs (#210) with progress; cancel one (or all).
+ //!   `engine.execute`, `ui.menu.invoke` and `ui.dialog.confirm` wait for a command that runs as a
+@@ -44,6 +46,7 @@ use crate::canvas::{ToolEvent, tool_event};
+ use crate::state::{DialogKind, Tool};
+ 
+ mod dispatch;
++mod export_image;
+ mod inspect;
+ mod params;
+ 
+@@ -183,6 +186,7 @@ pub fn handle(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlRequest
+ mod tests;
+ 
+ pub(super) const METHODS: &[&str] = &[
++    "app.exportImage",
+     "app.open",
+     "app.quit",
+     "app.save",
+diff --git a/crates/ui-egui/src/control/dispatch.rs b/crates/ui-egui/src/control/dispatch.rs
+index 262cd9d..eb3bdd3 100644
+--- a/crates/ui-egui/src/control/dispatch.rs
++++ b/crates/ui-egui/src/control/dispatch.rs
+@@ -1403,6 +1403,7 @@ fn app_methods(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlReques
+             }
+             Err(e) => err(e),
+         },
++        "app.exportImage" => wrap(super::export_image::export_image(app, p)),
+         "app.quit" => {
+             app.allow_close = true;
+             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+diff --git a/crates/ui-egui/src/control/export_image.rs b/crates/ui-egui/src/control/export_image.rs
+new file mode 100644
+index 0000000..00dc743
+--- /dev/null
++++ b/crates/ui-egui/src/control/export_image.rs
+@@ -0,0 +1,130 @@
++//! `app.exportImage {format?, maxSide?, quality?}` (Hanpan): the active document's composite as
++//! PNG or JPEG bytes, for a caller that wants the picture and not a file. Nothing is written or
++//! downloaded, and the document keeps its revision, path and modified flag; the status line and
++//! the notices are not touched. Reply: `{dataBase64, width, height, format}`.
++
++use base64::Engine as _;
++use photocraft_codecs::{ChannelLayout, EncodeOptions, Format, Image};
++use serde_json::{Value, json};
++
++use crate::{ExportSettings, PhotocraftApp};
++
++/// The longest side `maxSide` may ask for, and the default JPEG quality.
++const MAX_SIDE: u64 = 16_384;
++const JPEG_QUALITY: u8 = 85;
++
++pub(super) fn export_image(app: &PhotocraftApp, p: &Value) -> Result<Value, String> {
++    let jpeg = match p.get("format").map(|v| v.as_str()) {
++        None | Some(Some("png")) => false,
++        Some(Some("jpeg" | "jpg")) => true,
++        _ => return Err("`format` must be \"png\" or \"jpeg\"".into()),
++    };
++    let max_side = match p.get("maxSide") {
++        None | Some(Value::Null) => None,
++        Some(v) => Some(v.as_u64().filter(|n| (1..=MAX_SIDE).contains(n)).ok_or(format!("`maxSide` must be a whole number from 1 to {MAX_SIDE}"))? as u32),
++    };
++    let quality = match p.get("quality") {
++        None | Some(Value::Null) => JPEG_QUALITY,
++        Some(v) => v.as_u64().filter(|n| (1..=100).contains(n)).ok_or("`quality` must be a whole number from 1 to 100")? as u8,
++    };
++
++    let state = app.session.active().ok_or("no document")?;
++    let export = app.services.export.as_ref().ok_or("no exporter configured")?;
++    // The same composite File › Export writes, without the metadata packet or linked files.
++    let settings = ExportSettings { read_linked_files: false, xmp_all: false, ..ExportSettings::default() };
++    let (png, _warnings) = export(&state.doc, "export.png", &settings)?;
++    let image = photocraft_codecs::decode_as(Format::Png, &png).map_err(|e| e.to_string())?;
++    let (w, h) = image.dimensions();
++    let (nw, nh) = fit(w, h, max_side);
++    if !jpeg && (nw, nh) == (w, h) {
++        return Ok(reply(&png, w, h, "png"));
++    }
++    let rgba = downscale(&image.to_rgba8(), w, h, nw, nh);
++    let bytes = if jpeg {
++        // JPEG has no alpha: transparent areas come out white, as on a page
++        let rgb: Vec<u8> = rgba
++            .chunks_exact(4)
++            .flat_map(|px| {
++                let a = px[3] as u32;
++                [0, 1, 2].map(|i| ((px[i] as u32 * a + 255 * (255 - a) + 127) / 255) as u8)
++            })
++            .collect();
++        let img = Image::from_u8(nw, nh, ChannelLayout::Rgb, rgb).map_err(|e| e.to_string())?;
++        photocraft_codecs::encode(&img, Format::Jpeg, &EncodeOptions { jpeg_quality: quality, ..EncodeOptions::default() }).map_err(|e| e.to_string())?
++    } else {
++        let img = Image::from_u8(nw, nh, ChannelLayout::Rgba, rgba).map_err(|e| e.to_string())?;
++        photocraft_codecs::encode(&img, Format::Png, &EncodeOptions::default()).map_err(|e| e.to_string())?
++    };
++    Ok(reply(&bytes, nw, nh, if jpeg { "jpeg" } else { "png" }))
++}
++
++fn reply(bytes: &[u8], width: u32, height: u32, format: &str) -> Value {
++    json!({"dataBase64": base64::engine::general_purpose::STANDARD.encode(bytes), "width": width, "height": height, "format": format})
++}
++
++/// The size that fits `max_side` on the longer side, keeping the aspect; never larger.
++fn fit(w: u32, h: u32, max_side: Option<u32>) -> (u32, u32) {
++    match max_side {
++        Some(m) if w.max(h) > m => {
++            let s = m as f64 / w.max(h) as f64;
++            (((w as f64 * s).round() as u32).clamp(1, m), ((h as f64 * s).round() as u32).clamp(1, m))
++        }
++        _ => (w, h),
++    }
++}
++
++/// Box filter from `w`×`h` to `nw`×`nh` RGBA8 (alpha-weighted, so transparent pixels do not
++/// darken the edges).
++fn downscale(src: &[u8], w: u32, h: u32, nw: u32, nh: u32) -> Vec<u8> {
++    if (nw, nh) == (w, h) {
++        return src.to_vec();
++    }
++    let mut out = vec![0u8; (nw * nh * 4) as usize];
++    for y in 0..nh {
++        let (y0, y1) = ((y as u64 * h as u64 / nh as u64) as u32, (((y + 1) as u64 * h as u64).div_ceil(nh as u64)) as u32);
++        for x in 0..nw {
++            let (x0, x1) = ((x as u64 * w as u64 / nw as u64) as u32, (((x + 1) as u64 * w as u64).div_ceil(nw as u64)) as u32);
++            let (mut c, mut a, mut n) = ([0u64; 3], 0u64, 0u64);
++            for sy in y0..y1.min(h) {
++                for sx in x0..x1.min(w) {
++                    let i = ((sy * w + sx) * 4) as usize;
++                    let pa = src[i + 3] as u64;
++                    for k in 0..3 {
++                        c[k] += src[i + k] as u64 * pa;
++                    }
++                    a += pa;
++                    n += 1;
++                }
++            }
++            let o = ((y * nw + x) * 4) as usize;
++            if a > 0 {
++                for k in 0..3 {
++                    out[o + k] = ((c[k] + a / 2) / a) as u8;
++                }
++            }
++            out[o + 3] = ((a + n / 2) / n.max(1)) as u8;
++        }
++    }
++    out
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn fit_keeps_the_aspect_and_never_enlarges() {
++        assert_eq!(fit(600, 300, Some(200)), (200, 100));
++        assert_eq!(fit(300, 600, Some(200)), (100, 200));
++        assert_eq!(fit(100, 50, Some(200)), (100, 50));
++        assert_eq!(fit(100, 50, None), (100, 50));
++        assert_eq!(fit(5000, 1, Some(100)), (100, 1));
++    }
++
++    #[test]
++    fn downscale_averages_and_ignores_transparent_colour() {
++        // 2×1: opaque red and a transparent green → one half-transparent red pixel
++        let src = [255, 0, 0, 255, 0, 255, 0, 0];
++        assert_eq!(downscale(&src, 2, 1, 1, 1), vec![255, 0, 0, 128]);
++    }
++}

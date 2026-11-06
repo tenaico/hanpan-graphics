@@ -5,7 +5,7 @@
     "commit": "7c12f647150f8e7b2e07718f7993b1fcaa57fefe",
     "webApp": "apps/photocraft-web",
     "global": "photocraft",
-    "hanpanRev": 4
+    "hanpanRev": 5
   },
   "illust": {
     "repo": "storytold/vectorcraft",
@@ -13,7 +13,7 @@
     "commit": "11862f61198c8f62c0b22b6c9a331cc5950ac98d",
     "webApp": "apps/vectorcraft-web",
     "global": "vectorcraft",
-    "hanpanRev": 4
+    "hanpanRev": 5
   },
   "craftFonts": {
     "repo": "storytold/craft-fonts",

@@ -16,10 +16,10 @@ test('reads the pinned versions', () => {
 
 test('names the outputs', () => {
   const p = readPins('pins.json')
-  assert.equal(artifactName('photo', p), 'hanpan-photo-web-0.20.2-h2.zip')
-  assert.equal(artifactName('illust', p), 'hanpan-illust-web-0.21.0-h2.zip')
-  assert.equal(releaseTag('photo', p), 'photo-v0.20.2-h2')
-  assert.equal(releaseTag('illust', p), 'illust-v0.21.0-h2')
+  assert.equal(artifactName('photo', p), 'hanpan-photo-web-0.20.2-h3.zip')
+  assert.equal(artifactName('illust', p), 'hanpan-illust-web-0.21.0-h3.zip')
+  assert.equal(releaseTag('photo', p), 'photo-v0.20.2-h3')
+  assert.equal(releaseTag('illust', p), 'illust-v0.21.0-h3')
 })
 
 test('rejects a short commit', () => {

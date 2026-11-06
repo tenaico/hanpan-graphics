@@ -1,0 +1,208 @@
+diff --git a/crates/engine/src/hidden_target.rs b/crates/engine/src/hidden_target.rs
+index c8bcbf54db3e4069793fd8a3ce4cb3707c3c0662..c79c875698af34a084eb13f10c863d7bb348d7ac 100644
+--- a/crates/engine/src/hidden_target.rs
++++ b/crates/engine/src/hidden_target.rs
+@@ -41,6 +41,20 @@ fn shown(doc: &Document, id: LayerId) -> bool {
+     doc.path_of(id).is_some_and(|path| (1..=path.len()).all(|n| path.get(..n).and_then(|p| doc.layer_at(p)).is_some_and(|l| l.visible)))
+ }
+ 
++/// Hanpan: does command `id` with `params` find no layer to work on, as with every layer deselected
++/// (Select › Deselect Layers, or a Move-tool click on the pasteboard)? An alpha channel or Quick
++/// Mask target needs none. The engine refuses such a command with "no active layer".
++pub fn no_target_layer(s: &Session, id: &str, params: &Value) -> bool {
++    if !GATED.contains(&id) {
++        return false;
++    }
++    let params = crate::channel_cmds::inject_target(s, id, params.clone());
++    if crate::channel_cmds::is_channel_target(&params) {
++        return false;
++    }
++    s.active().is_some() && crate::commands::layer_param(s, &params).is_err()
++}
++
+ /// Why command `id` with `params` must not run: its target layer is hidden. `None` for other
+ /// commands, channel targets, and visible layers.
+ pub fn refusal(s: &Session, id: &str, params: &Value) -> Option<&'static str> {
+diff --git a/crates/ui-egui/src/canvas/tool_input.rs b/crates/ui-egui/src/canvas/tool_input.rs
+index 671b5077237b65836e8df1c989fa9aac642f58ee..a757a93c53131a7f6a4050ffb65a4bf3e14505e4 100644
+--- a/crates/ui-egui/src/canvas/tool_input.rs
++++ b/crates/ui-egui/src/canvas/tool_input.rs
+@@ -370,6 +370,14 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
+                 app.ui.status_error = true;
+                 return;
+             }
++            // Hanpan: with no layer chosen a painting tool has nothing to paint on; the press is
++            // refused with a hint in the interface language (the engine would refuse the stroke
++            // after it was drawn, in its own words).
++            if !sets_source && no_target_layer(app, tool) {
++                app.ui.status = tl!(crate::embedded::NO_LAYER_HINT).into();
++                app.ui.status_error = true;
++                return;
++            }
+             if !sets_source && crate::rasterize_prompt::intercept(app, tool, x, y, pressure) {
+                 return;
+             }
+@@ -603,6 +611,18 @@ fn hidden_target(app: &PhotocraftApp, tool: Tool) -> Option<&'static str> {
+     photocraft_engine::hidden_target::refusal(&app.session, cmd, &json!({}))
+ }
+ 
++/// Hanpan: does a press with painting tool `tool` find no layer to paint on (every layer
++/// deselected)? The Move tool is left alone: its Auto-Select picks the layer under the pointer.
++fn no_target_layer(app: &PhotocraftApp, tool: Tool) -> bool {
++    let cmd = match tool {
++        Tool::Gradient if !app.ui.tool_options.gradient_classic => return false,
++        t if t.is_brushlike() || matches!(t, Tool::PaintBucket | Tool::MagicEraser) => "paint.stroke",
++        Tool::Gradient => "paint.stroke",
++        _ => return false,
++    };
++    photocraft_engine::hidden_target::no_target_layer(&app.session, cmd, &json!({}))
++}
++
+ /// Is document point `p` inside the active document's selection?
+ fn inside_selection(app: &PhotocraftApp, p: [f64; 2]) -> bool {
+     app.session.active().and_then(|st| st.doc.selection.as_ref()).is_some_and(|sel| covers(sel, p))
+diff --git a/crates/ui-egui/src/embedded.rs b/crates/ui-egui/src/embedded.rs
+index 711dd8b1450e183a3d8733a80d08ec33c58257fb..04e88555fe81e0ca3c2a048065b28470f540cbdb 100644
+--- a/crates/ui-egui/src/embedded.rs
++++ b/crates/ui-egui/src/embedded.rs
+@@ -6,6 +6,21 @@
+ //! engine commands are not gated: the host drives them.
+ 
+ /// Does the page query (`location.search`, with or without its `?`) ask for embedded mode?
++/// A press with a painting tool while no layer is chosen: the hint the status line shows in the
++/// interface language, in place of the engine's "command `…` is not available right now: no
++/// active layer" (0.17 final check).
++pub const NO_LAYER_HINT: &str = "Choose a layer first. Click the layer to paint on in the Layers panel.";
++
++/// The status line's text as shown: the engine's "no active layer" refusal becomes
++/// [`NO_LAYER_HINT`], whichever path put it there.
++pub fn shown_status(status: &str) -> std::borrow::Cow<'_, str> {
++    if status.ends_with("is not available right now: no active layer") || status == "no active layer" {
++        std::borrow::Cow::Borrowed(tl!(NO_LAYER_HINT))
++    } else {
++        std::borrow::Cow::Borrowed(status)
++    }
++}
++
+ pub fn requested(query: &str) -> bool {
+     query.trim_start_matches('?').split('&').any(|kv| kv == "embedded=hanpan")
+ }
+diff --git a/crates/ui-egui/src/hidden_layer_tests.rs b/crates/ui-egui/src/hidden_layer_tests.rs
+index 806aadd8a21a09094012de54fe5abc09d48f8fce..6c4dc10bfd5b152905e8af75c0272ee8067d51af 100644
+--- a/crates/ui-egui/src/hidden_layer_tests.rs
++++ b/crates/ui-egui/src/hidden_layer_tests.rs
+@@ -95,3 +95,45 @@ fn the_live_gradient_still_works_over_a_hidden_layer() {
+     assert_eq!(app.session.active().unwrap().doc.layers.len(), layers + 1, "a Gradient Fill layer was added");
+     assert_eq!(bounds(&app, id), Rect::new(8, 8, 24, 24));
+ }
++
++/// Hanpan: with no layer chosen (a Move-tool click on the pasteboard deselects every layer,
++/// #8100), a press with a painting tool is refused with a hint in the interface language, not the
++/// engine's "command `paint.stroke` is not available right now: no active layer" after the stroke.
++#[test]
++fn hanpan_painting_with_no_layer_chosen_asks_for_one() {
++    let ko = crate::i18n::Lang::from_code("ko").expect("ko registered");
++    for tool in [Tool::Brush, Tool::Pencil, Tool::Eraser, Tool::PaintBucket, Tool::CloneStamp] {
++        let (mut app, id) = app(tool);
++        app.session.execute("layer.setProps", json!({"layer": id.0, "visible": true})).unwrap();
++        app.session.execute("select.deselectLayers", json!({})).unwrap();
++        assert_eq!(app.session.active().unwrap().active_layer, None);
++        let n = steps(&app);
++        crate::i18n::with_language(ko, || {
++            tool_event(&mut app, ToolEvent::Down { x: 30.0, y: 30.0, pressure: 1.0 }, egui::Modifiers::NONE);
++        });
++        assert!(app.drag.is_none() && app.live_stroke.is_none(), "{tool:?}: no stroke started");
++        assert!(app.ui.status_error, "{tool:?}");
++        assert_eq!(app.ui.status, "레이어를 먼저 고르세요. 레이어 패널에서 그릴 레이어를 누르세요.", "{tool:?}");
++        tool_event(&mut app, ToolEvent::Up { x: 40.0, y: 40.0 }, egui::Modifiers::NONE);
++        assert_eq!(steps(&app), n, "{tool:?}: nothing painted");
++        assert!(!app.ui.status.contains("not available"), "{tool:?}: {}", app.ui.status);
++        // A layer chosen again, the same press paints.
++        app.session.execute("layer.select", json!({"layer": id.0})).unwrap();
++        app.ui.status.clear();
++        app.ui.status_error = false;
++        tool_event(&mut app, ToolEvent::Down { x: 30.0, y: 30.0, pressure: 1.0 }, egui::Modifiers::NONE);
++        assert!(app.ui.status.is_empty(), "{tool:?}: {}", app.ui.status);
++    }
++}
++
++/// Hanpan: the engine's "no active layer" refusal never reaches the status line as it is, whichever
++/// path set it: the line shows the same hint.
++#[test]
++fn hanpan_the_status_line_says_no_active_layer_in_the_interface_language() {
++    let ko = crate::i18n::Lang::from_code("ko").expect("ko registered");
++    let engine = "command `paint.stroke` is not available right now: no active layer";
++    crate::i18n::with_language(ko, || {
++        assert_eq!(crate::panels::status_bar::shown_status(engine), "레이어를 먼저 고르세요. 레이어 패널에서 그릴 레이어를 누르세요.");
++        assert_eq!(crate::panels::status_bar::shown_status("photo.psd 저장됨"), "photo.psd 저장됨");
++    });
++}
+diff --git a/crates/ui-egui/src/i18n/ko.tsv b/crates/ui-egui/src/i18n/ko.tsv
+index 817c049afbb20914b659105988d292d0805bfe0a..5a20708a770cdb0ae59e9527a74ca83727a86316 100644
+--- a/crates/ui-egui/src/i18n/ko.tsv
++++ b/crates/ui-egui/src/i18n/ko.tsv
+@@ -3739,3 +3739,4 @@ smartSvg	AI/PDF/EPS contents will be edited as SVG. Saving replaces the embedded
+ 	Layer {n}	레이어 {n}
+ @id	file.revert	저장된 상태로 복귀
+ 	font '{font}' is not installed; text may render using a fallback face	'{font}' 글꼴이 이 PC에 없어 다른 글꼴로 표시합니다.
++	Choose a layer first. Click the layer to paint on in the Layers panel.	레이어를 먼저 고르세요. 레이어 패널에서 그릴 레이어를 누르세요.
+diff --git a/crates/ui-egui/src/i18n/vi.tsv b/crates/ui-egui/src/i18n/vi.tsv
+index 399b8cce988b8cbea2e5bfc52c2db0d8dddad320..bc9557ff6cc4f1ed23191598b80218203a33de4d 100644
+--- a/crates/ui-egui/src/i18n/vi.tsv
++++ b/crates/ui-egui/src/i18n/vi.tsv
+@@ -4026,3 +4026,4 @@ smartSvg	AI/PDF/EPS contents will be edited as SVG. Saving replaces the embedded
+ 	Layer {n}	Lớp {n}
+ @id	file.revert	Hoàn nguyên về bản đã lưu
+ 	font '{font}' is not installed; text may render using a fallback face	Phông '{font}' không có trên máy này; chữ được hiển thị bằng phông khác.
++	Choose a layer first. Click the layer to paint on in the Layers panel.	Hãy chọn lớp trước. Bấm vào lớp cần vẽ trong bảng Lớp.
+diff --git a/crates/ui-egui/src/panels.rs b/crates/ui-egui/src/panels.rs
+index 9f4ea4e0a9849e0ebd00a6317690c528ceb44d6f..b0509dc4cbd70d05662ca29c7e9f208b8ace1140 100644
+--- a/crates/ui-egui/src/panels.rs
++++ b/crates/ui-egui/src/panels.rs
+@@ -55,7 +55,7 @@ pub mod preset_panels;
+ mod properties;
+ pub mod props_layout;
+ pub mod smart_ui;
+-mod status_bar;
++pub(crate) mod status_bar;
+ pub mod swatches_ui;
+ pub(super) mod timeline_ui;
+ pub(crate) mod title_bar;
+diff --git a/crates/ui-egui/src/panels/chrome_ui.rs b/crates/ui-egui/src/panels/chrome_ui.rs
+index 82a70fd408d39e56adbfa80b69091a49c53364c6..10f0b003f88a1949443ce49abbdc9c7db47cc43f 100644
+--- a/crates/ui-egui/src/panels/chrome_ui.rs
++++ b/crates/ui-egui/src/panels/chrome_ui.rs
+@@ -235,7 +235,7 @@ fn status_message(app: &PhotocraftApp, ui: &mut egui::Ui, t: &Tokens) {
+     let (r, _) = ui.allocate_exact_size(vec2(17.0, 16.0), Sense::hover());
+     ui.painter().line_segment([r.center_top(), r.center_bottom()], Stroke::new(1.0, t.separator));
+     let is_err = app.ui.status_error || app.ui.status.starts_with("Couldn");
+-    ui.label(RichText::new(&app.ui.status).color(if is_err { t.warning } else { t.text_faint }));
++    ui.label(RichText::new(crate::embedded::shown_status(&app.ui.status)).color(if is_err { t.warning } else { t.text_faint }));
+ }
+ 
+ /// Home button at the very start of Photoshop 2026's options bar: toggles the Home (start)
+diff --git a/crates/ui-egui/src/panels/status_bar.rs b/crates/ui-egui/src/panels/status_bar.rs
+index 4313e6483993310f3f2aa12fee9d76de31111341..348feae6e634b0289f548b37c3b94932188f4412 100644
+--- a/crates/ui-egui/src/panels/status_bar.rs
++++ b/crates/ui-egui/src/panels/status_bar.rs
+@@ -4,6 +4,11 @@ use super::{PhotocraftApp, RichText, Tokens, label, vec2, widgets};
+ 
+ /// The status bar's height and the height of the controls in it (zoom field, Fit), which leaves
+ /// them an even margin above and below inside the bar (#2823).
++/// Hanpan: the status line's text as shown ([`crate::embedded::shown_status`]).
++pub(crate) fn shown_status(status: &str) -> String {
++    crate::embedded::shown_status(status).into_owned()
++}
++
+ pub fn status_bar_heights(t: &Tokens) -> (f32, f32) {
+     if t.pro { (24.0, 18.0) } else { (30.0, 22.0) }
+ }
+@@ -50,7 +55,7 @@ pub fn status_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+                 if !app.ui.status.is_empty() {
+                     widgets::vline(ui, 16.0);
+                     let is_err = app.ui.status_error || app.ui.status.starts_with("Couldn");
+-                    ui.label(RichText::new(&app.ui.status).color(if is_err { t.warning } else { t.text_faint }));
++                    ui.label(RichText::new(shown_status(&app.ui.status)).color(if is_err { t.warning } else { t.text_faint }));
+                 }
+                 ui.with_layout(crate::direction::trailing(), |ui| {
+                     if app.session.active().is_some()

@@ -258,6 +258,65 @@
     return ok(`${results.join('; ')}; state unchanged ${JSON.stringify(after)}`)
   }
 
+  // Hanpan embedded mode (?embedded=hanpan): the font menus' "이 PC의 글꼴" section lists the PC's
+  // fonts (window.queryLocalFonts, allowed here as Hanpan's shell allows it) and loads a picked
+  // family. Through the page API's `fonts.local`, the same path: list, load 맑은 고딕 (Malgun
+  // Gothic, Windows), set Korean text in it without a fallback, and export it (PhotoCraft: the PNG
+  // composite; VectorCraft: SVG with outlines, and SVG with the font embedded as @font-face).
+  checks['local-fonts'] = async ({ global }) => {
+    const api = await waitFor(() => window[global], 60000)
+    if (!api) return fail(`no window.${global}`)
+    if (typeof window.queryLocalFonts !== 'function') return fail('no window.queryLocalFonts in this page')
+    const poll = async (params, done, ms) => {
+      const t0 = performance.now()
+      let r
+      while (performance.now() - t0 < ms) {
+        r = await api.request('fonts.local', params)
+        if (done(r)) return r
+        await sleep(300)
+      }
+      return r
+    }
+    const listed = await poll({}, (r) => r.listing !== 'pending', 30000)
+    if (listed?.listing !== 'listed') return fail(`list: ${JSON.stringify(listed)}`)
+    const family = 'Malgun Gothic'
+    if (!listed.families.includes(family)) return fail(`${listed.families.length} PC families, no ${family}`)
+    const t0 = performance.now()
+    const loaded = await poll({ family }, (r) => r.status !== 'loading', 30000)
+    if (loaded?.status !== 'loaded') return fail(`load: ${JSON.stringify(loaded)}`)
+    const ms = Math.round(performance.now() - t0)
+    const font = loaded.names.find((n) => n.toLowerCase() === family.toLowerCase()) ?? loaded.names[0]
+    // PhotoCraft registers the files on its next frame
+    const t1 = performance.now()
+    while (performance.now() - t1 < 10000 && !(await fontFamilies(api, global)).includes(font)) await sleep(300)
+    if (!(await fontFamilies(api, global)).includes(font)) return fail(`${font} not in the app's font list after loading`)
+    const i = await api.inspect()
+    const docs = global === 'photocraft' ? i.session?.documents?.length : i.documents?.length
+    if (!docs) await newDocument(api, global)
+    const params = { x: 40, y: 120, text: '맑은 고딕 한판 테스트', font, size: 36 }
+    const made = global === 'photocraft' ? await api.execute('type.create', params) : await api.execute('text.create', params)
+    if (/fallback|not available|missing/i.test(JSON.stringify(made))) return fail(`text fell back: ${JSON.stringify(made).slice(0, 300)}`)
+    const bytesOf = (b64) => [...atob(b64.slice(0, 8))].map((c) => c.charCodeAt(0))
+    let exported
+    if (global === 'photocraft') {
+      const r = await api.request('app.exportImage', { format: 'png' })
+      const head = bytesOf(r.dataBase64)
+      if (head[0] !== 0x89 || head[1] !== 0x50) return fail(`export: not a PNG ${head}`)
+      exported = `PNG ${r.width}x${r.height}`
+    } else {
+      const svg = async (opts) => {
+        const r = await api.request('app.export', { format: 'svg', ...opts })
+        return new TextDecoder().decode(Uint8Array.from(atob(r.dataBase64), (c) => c.charCodeAt(0)))
+      }
+      const outlined = await svg({ outlineText: true })
+      if (/<text[\s>]/.test(outlined) || !/<path[\s>]/.test(outlined)) return fail(`outlined SVG has <text> or no <path>: ${outlined.slice(0, 300)}`)
+      const embedded = await svg({ outlineText: false, embedFonts: true })
+      if (!/@font-face/.test(embedded) || !embedded.includes(font)) return fail(`SVG with embedFonts: no @font-face for ${font}: ${embedded.slice(0, 400)}`)
+      exported = `SVG outlines ${outlined.length}B, @font-face ${embedded.length}B`
+    }
+    return ok(`${listed.families.length} PC families; ${font} (${loaded.names.length} names) loaded in ${ms}ms; Korean text set; ${exported}`)
+  }
+
   window.__smoke = {
     async run(name, ctx) {
       const check = checks[name]

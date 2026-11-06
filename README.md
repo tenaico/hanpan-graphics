@@ -28,7 +28,7 @@ its SHA-256. A draft is not visible to Hanpan until it is published.
 Before publishing, download the zip from the draft, check it against its `.sha256`, unzip it and
 run the Electron smoke on Windows with a GPU against that exact site:
 `node scripts/smoke.mjs --app <app> --site <unzipped dir> --checks boot,api,api-immediate,capture,fonts,fonts-early-text`
-and with `--query "lang=ko&embedded=hanpan" --checks embedded-with-lang,save-clean` (each embedded check needs a
+and with `--query "lang=ko&embedded=hanpan" --checks embedded-with-lang,save-clean` and `--query "embedded=hanpan" --checks local-fonts` (the PC's fonts: lists them, loads Malgun Gothic and exports Korean text set in it; needs Windows) (each embedded check needs a
 fresh page with no document: run `--checks embedded` on its own, in a separate run).
 For PhotoCraft also run `--gpu none --checks api-no-start` (a page without WebGPU or WebGL: the app
 cannot start, and its page API must reject with the reason instead of waiting forever).

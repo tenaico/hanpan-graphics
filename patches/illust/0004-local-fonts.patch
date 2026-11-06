@@ -1,0 +1,562 @@
+diff --git a/apps/vectorcraft-web/src/local_fonts.rs b/apps/vectorcraft-web/src/local_fonts.rs
+new file mode 100644
+index 0000000..9e972b0
+--- /dev/null
++++ b/apps/vectorcraft-web/src/local_fonts.rs
+@@ -0,0 +1,121 @@
++//! Hanpan: the PC's fonts for the font menus' "이 PC의 글꼴" section (embedded mode,
++//! `vectorcraft_ui_egui::local_fonts`). The browser's Local Font Access API
++//! (`window.queryLocalFonts()`, Chromium and Electron) lists them when a font menu first opens;
++//! a family picked there has its files read (`FontData.blob()`) and added to the font database,
++//! where the canvas, PNG export and SVG outlines or embedded fonts use them like any other font.
++
++use std::cell::RefCell;
++use std::collections::{HashMap, HashSet};
++
++use js_sys::{Array, Function, Promise, Reflect, Uint8Array};
++use vectorcraft_text::FontDb;
++use vectorcraft_ui_egui::local_fonts;
++use wasm_bindgen::{JsCast as _, JsValue};
++use wasm_bindgen_futures::JsFuture;
++
++thread_local! {
++    /// The `FontData` objects of each family the list gave, by family.
++    static FACES: RefCell<HashMap<String, Vec<JsValue>>> = RefCell::new(HashMap::new());
++}
++
++/// Called every frame: reads the list or loads the families the menus asked for.
++pub fn poll(ctx: &egui::Context) {
++    if local_fonts::take_list_request() {
++        let ctx = ctx.clone();
++        wasm_bindgen_futures::spawn_local(async move {
++            let result = list().await;
++            if let Err(e) = &result {
++                log::warn!("local fonts: {e}");
++            }
++            local_fonts::listed(result);
++            ctx.request_repaint();
++        });
++    }
++    for family in local_fonts::take_requests() {
++        let ctx = ctx.clone();
++        wasm_bindgen_futures::spawn_local(async move {
++            let result = load(&family).await;
++            match &result {
++                Ok(names) => log::info!("local fonts: {family} registered {names:?}"),
++                Err(e) => log::warn!("local fonts: {family}: {e}"),
++            }
++            local_fonts::finished(&family, result);
++            ctx.request_repaint();
++        });
++    }
++}
++
++/// `queryLocalFonts()`, grouped by family into [`FACES`]; the families.
++async fn list() -> Result<Vec<String>, String> {
++    let window = web_sys::window().ok_or("no window")?;
++    let query = Reflect::get(&window, &JsValue::from_str("queryLocalFonts")).map_err(js)?;
++    let Some(query) = query.dyn_ref::<Function>() else {
++        return Err("이 브라우저는 PC 글꼴 목록(Local Font Access)을 지원하지 않습니다".into());
++    };
++    let promise: Promise = query.call0(&window).map_err(js)?.dyn_into().map_err(js)?;
++    let fonts = Array::from(&JsFuture::from(promise).await.map_err(js)?);
++    let mut by_family: HashMap<String, Vec<JsValue>> = HashMap::new();
++    for font in fonts.iter() {
++        let family = Reflect::get(&font, &JsValue::from_str("family")).ok().and_then(|f| f.as_string()).unwrap_or_default();
++        if !family.trim().is_empty() {
++            by_family.entry(family).or_default().push(font);
++        }
++    }
++    let families: Vec<String> = by_family.keys().cloned().collect();
++    log::info!("local fonts: {} families, {} faces", families.len(), fonts.length());
++    FACES.with(|f| *f.borrow_mut() = by_family);
++    Ok(families)
++}
++
++/// Read `family`'s files and add them to the font database. The family names they registered
++/// (a family already there counts as registered).
++async fn load(family: &str) -> Result<Vec<String>, String> {
++    let faces = FACES.with(|f| f.borrow().get(family).cloned()).unwrap_or_default();
++    if faces.is_empty() {
++        return Err("목록에 없는 글꼴".into());
++    }
++    let db = FontDb::global();
++    let before: HashSet<String> = db.family_list().iter().map(|f| f.to_lowercase()).collect();
++    // A collection (.ttc) is one file for several faces: read it once.
++    let mut seen: HashSet<(usize, u64)> = HashSet::new();
++    let mut errors = Vec::new();
++    for face in faces {
++        match bytes_of(&face).await {
++            Ok(bytes) => {
++                if seen.insert((bytes.len(), fingerprint(&bytes))) {
++                    db.add_font(bytes);
++                }
++            }
++            Err(e) => errors.push(e),
++        }
++    }
++    let mut names: Vec<String> = db.family_list().iter().filter(|f| !before.contains(&f.to_lowercase())).cloned().collect();
++    if before.contains(&family.to_lowercase()) || db.family_list().iter().any(|f| f.eq_ignore_ascii_case(family)) {
++        names.retain(|n| !n.eq_ignore_ascii_case(family));
++        names.insert(0, family.to_string());
++    }
++    if names.is_empty() {
++        return Err(errors.first().cloned().unwrap_or_else(|| "글꼴 파일을 읽지 못했습니다".into()));
++    }
++    Ok(names)
++}
++
++/// `await fontData.blob()` as bytes.
++async fn bytes_of(face: &JsValue) -> Result<Vec<u8>, String> {
++    let blob_fn: Function = Reflect::get(face, &JsValue::from_str("blob")).map_err(js)?.dyn_into().map_err(js)?;
++    let promise: Promise = blob_fn.call0(face).map_err(js)?.dyn_into().map_err(js)?;
++    let blob: web_sys::Blob = JsFuture::from(promise).await.map_err(js)?.dyn_into().map_err(js)?;
++    let buffer = JsFuture::from(blob.array_buffer()).await.map_err(js)?;
++    Ok(Uint8Array::new(&buffer).to_vec())
++}
++
++/// FNV-1a over the first 64 KiB: tells files of the same length apart.
++fn fingerprint(bytes: &[u8]) -> u64 {
++    bytes.iter().take(64 * 1024).fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3))
++}
++
++fn js(e: JsValue) -> String {
++    e.as_string()
++        .or_else(|| Reflect::get(&e, &JsValue::from_str("message")).ok().and_then(|m| m.as_string()))
++        .unwrap_or_else(|| format!("{e:?}"))
++}
+diff --git a/apps/vectorcraft-web/src/main.rs b/apps/vectorcraft-web/src/main.rs
+index f7dd201..ebfdae4 100644
+--- a/apps/vectorcraft-web/src/main.rs
++++ b/apps/vectorcraft-web/src/main.rs
+@@ -25,6 +25,9 @@ mod api;
+ mod fonts;
+ #[cfg(any(target_arch = "wasm32", test))]
+ mod keys;
++// Hanpan: the PC's fonts in the font menus (embedded mode)
++#[cfg(target_arch = "wasm32")]
++mod local_fonts;
+ #[cfg(target_arch = "wasm32")]
+ mod locks;
+ #[cfg(any(target_arch = "wasm32", test))]
+diff --git a/apps/vectorcraft-web/src/web.rs b/apps/vectorcraft-web/src/web.rs
+index 3d3693c..a47ff7e 100644
+--- a/apps/vectorcraft-web/src/web.rs
++++ b/apps/vectorcraft-web/src/web.rs
+@@ -123,6 +123,10 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
+                 let services = services(host.inbox.clone(), host.place_inbox.clone(), ctx.clone(), host.locks.clone(), stylus);
+                 // Hanpan: `?embedded=hanpan`, the host page owns the files (vectorcraft_ui_egui::embedded)
+                 let services = Services { embedded: vectorcraft_ui_egui::embedded::requested(&query()), ..services };
++                // Hanpan: embedded mode lists the PC's fonts in the font menus (crate::local_fonts)
++                if services.embedded {
++                    vectorcraft_ui_egui::local_fonts::enable();
++                }
+                 let app = match taken.borrow_mut().take() {
+                     Some(mut app) => {
+                         // The old services asked the old context for frames.
+@@ -371,6 +375,7 @@ impl eframe::App for WebShell {
+             self.restart(&why);
+         }
+         let Some(app) = &mut self.app else { return };
++        crate::local_fonts::poll(ctx);
+         app.tick(ctx);
+         crate::api::poll_replies();
+         app.finish_ime_logic(ctx);
+diff --git a/crates/ui-egui/src/control.rs b/crates/ui-egui/src/control.rs
+index fe35b4c..de7f305 100644
+--- a/crates/ui-egui/src/control.rs
++++ b/crates/ui-egui/src/control.rs
+@@ -272,6 +272,8 @@ pub fn handle(app: &mut VectorcraftApp, ctx: &egui::Context, req: &ControlReques
+         "ui.inspect" => ok(inspect(app, ctx)),
+         "ui.docking" => ok(crate::panel_docking::inspect(app, ctx)),
+         "ui.menu.list" => ok(serde_json::to_value(crate::menus::menu_entries(app)).unwrap_or_default()),
++        // Hanpan: the PC's fonts (embedded mode, `crate::local_fonts`)
++        "fonts.local" => wrap(crate::local_fonts::control(p)),
+         "ui.contextMenu.list" => ok(serde_json::to_value(crate::menus::context_entries(app)).unwrap_or_default()),
+         "ui.tool.select" => wrap(app.run("tool.select", json!({"tool": s("tool").unwrap_or("")}))),
+         "ui.tool.list" => ok(serde_json::to_value(vectorcraft_tools::TOOL_GROUPS).unwrap_or_default()),
+diff --git a/crates/ui-egui/src/font_menu.rs b/crates/ui-egui/src/font_menu.rs
+index 93ae778..378b1e7 100644
+--- a/crates/ui-egui/src/font_menu.rs
++++ b/crates/ui-egui/src/font_menu.rs
+@@ -139,18 +139,22 @@ enum Row {
+     Heading(&'static str),
+     Family(String),
+     Style(String, String),
++    /// Hanpan: a family of the PC not loaded yet (`crate::local_fonts`); picking it loads it first.
++    Local(String),
++    /// Hanpan: the PC section's status line; whether clicking it asks for the list again.
++    LocalNote(String, bool),
+ }
+ 
+ impl Row {
+     fn family(&self) -> Option<&str> {
+         match self {
+-            Row::Heading(_) => None,
++            Row::Heading(_) | Row::Local(_) | Row::LocalNote(..) => None,
+             Row::Family(f) | Row::Style(f, _) => Some(f),
+         }
+     }
+     fn style(&self) -> Option<&str> {
+         match self {
+-            Row::Heading(_) | Row::Family(_) => None,
++            Row::Heading(_) | Row::Family(_) | Row::Local(_) | Row::LocalNote(..) => None,
+             Row::Style(_, s) => Some(s),
+         }
+     }
+@@ -235,6 +239,8 @@ struct MenuState {
+     rows_key: Option<RowsKey>,
+     /// The height of the search field and filters last frame.
+     header: f32,
++    /// Hanpan: a PC family picked in the menu, chosen once it has loaded.
++    awaiting: Option<String>,
+ }
+ 
+ /// The font family menu showing `current`, `width` points wide, rows sampling `sample` (the
+@@ -367,6 +373,10 @@ fn header<'s>(ui: &mut Ui, state_id: egui::Id, st: &'s mut MenuState, current: &
+         }
+     });
+     let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
++    // Hanpan: the first menu to open asks for the PC's fonts (`crate::local_fonts`)
++    if crate::local_fonts::enabled() && crate::local_fonts::listing() == crate::local_fonts::Listing::NotAsked {
++        crate::local_fonts::ask_list();
++    }
+     let db = vectorcraft_text::FontDb::global();
+     // The current family by its own name (a document may name it in Japanese: ヒラギノ角ゴシック),
+     // as it was before any preview.
+@@ -384,7 +394,8 @@ fn header<'s>(ui: &mut Ui, state_id: egui::Id, st: &'s mut MenuState, current: &
+         st.expanded.clone(),
+         look.favorites.to_vec(),
+         look.recent.to_vec(),
+-        db.generation(),
++        // Hanpan: the PC section changes too (`crate::local_fonts`)
++        db.generation().wrapping_add(crate::local_fonts::generation() << 32),
+     );
+     if st.rows_key.as_ref() != Some(&key) {
+         let wanted = |f: &str| {
+@@ -402,7 +413,19 @@ fn header<'s>(ui: &mut Ui, state_id: egui::Id, st: &'s mut MenuState, current: &
+             script_matches(st.script, traits) && st.class.is_none_or(|c| c == traits.class) && (!st.variable_only || traits.variable)
+         };
+         let families: Vec<_> = db.menu_family_list().iter().filter(|f| wanted(f)).cloned().collect();
+-        let rows = grouped_rows(&families, look.recent, &st.expanded, |f| db.styles(f));
++        let mut rows = grouped_rows(&families, look.recent, &st.expanded, |f| db.styles(f));
++        // Hanpan: the PC's fonts below the app's, in their own section, while no filter is on
++        // (their traits are unknown until they load)
++        if crate::local_fonts::enabled() && st.script == 0 && st.class.is_none() && !st.variable_only && !st.favorites_only {
++            let local: Vec<Row> = match crate::local_fonts::note() {
++                Some((text, retry)) => vec![Row::LocalNote(text, retry)],
++                None => crate::local_fonts::families_for(&query, &db.family_list()).into_iter().map(Row::Local).collect(),
++            };
++            if !local.is_empty() {
++                rows.push(Row::Heading(crate::local_fonts::HEADING));
++                rows.extend(local);
++            }
++        }
+         // Filter changes (including un-starring a favourite) may remove rows; expanding
+         // another family or a background font scan can insert rows before the highlight.
+         // Never preview an unrelated family because the old numeric index now points to it.
+@@ -475,6 +498,7 @@ fn heading_row(ui: &mut Ui, row_h: f32, label: &str, t: &Tokens) {
+     // Existing translated menu labels; the heading cannot preview or apply a font.
+     let label = match label {
+         "Recent Fonts" => tl!("Recent Fonts"),
++        crate::local_fonts::HEADING => crate::local_fonts::HEADING,
+         _ => tl!("Fonts"),
+     };
+     ui.painter_at(rect).text(rect.left_center() + vec2(4.0, 0.0), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(11.0), t.text_dim);
+@@ -489,6 +513,22 @@ fn rows(ui: &mut Ui, range: std::ops::Range<usize>, h: Listed<'_>, sample: Optio
+     let t = Tokens::get(ui.ctx());
+     let db = vectorcraft_text::FontDb::global();
+     let favorite = |f: &str| look.favorites.iter().any(|x| x.eq_ignore_ascii_case(f));
++    // Hanpan: a PC family picked here is chosen once it has loaded, under the name its files gave
++    if let Some(family) = st.awaiting.clone() {
++        match crate::local_fonts::load_of(&family) {
++            Some(crate::local_fonts::Load::Loaded(names)) => {
++                st.awaiting = None;
++                let name = names.iter().find(|n| n.eq_ignore_ascii_case(&family)).or(names.first()).cloned();
++                if let Some(name) = name.filter(|n| db.family_list().iter().any(|f| f.eq_ignore_ascii_case(n))) {
++                    st.previewed = None;
++                    ui.close();
++                    return Some(FontPick::Chosen(name, None));
++                }
++            }
++            Some(crate::local_fonts::Load::Loading) => {}
++            _ => st.awaiting = None,
++        }
++    }
+     if rows.is_empty() {
+         // A filter or a font rescan can remove the row whose font was previewed.
+         // Do not leave that font applied while the list has no candidate to highlight.
+@@ -521,6 +561,39 @@ fn rows(ui: &mut Ui, range: std::ops::Range<usize>, h: Listed<'_>, sample: Optio
+             heading_row(ui, row_h, label, &t);
+             continue;
+         }
++        // Hanpan: the PC section's rows (`crate::local_fonts`)
++        if let Row::Local(family) = row {
++            let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
++            let p = ui.painter_at(rect);
++            if resp.hovered() {
++                p.rect_filled(rect, 2.0, t.hover);
++            }
++            let name_rect = egui::Rect::from_min_max(rect.min + vec2(DISCLOSURE, 0.0), rect.max - vec2(STAR, 0.0));
++            let mut text = family.clone();
++            if let Some(s) = crate::local_fonts::suffix(family) {
++                text = format!("{text}  ({s})");
++            }
++            ui.painter_at(name_rect).text(name_rect.left_center(), egui::Align2::LEFT_CENTER, text, egui::FontId::proportional(12.0), t.text);
++            if resp.clicked() {
++                crate::local_fonts::request(family);
++                st.awaiting = Some(family.clone());
++                // The highlighted font stays previewed until this one has loaded.
++            }
++            continue;
++        }
++        if let Row::LocalNote(text, retry) = row {
++            let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
++            let p = ui.painter_at(rect);
++            if *retry && resp.hovered() {
++                p.rect_filled(rect, 2.0, t.hover);
++            }
++            let color = if *retry { t.accent } else { t.text_dim };
++            p.text(rect.left_center() + vec2(DISCLOSURE, 0.0), egui::Align2::LEFT_CENTER, text, egui::FontId::proportional(12.0), color);
++            if *retry && resp.clicked() {
++                crate::local_fonts::ask_list();
++            }
++            continue;
++        }
+         let Some(family) = row.family() else { continue };
+         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
+         if resp.hovered() && ui.input(|inp| inp.pointer.delta() != egui::Vec2::ZERO || inp.smooth_scroll_delta != egui::Vec2::ZERO) {
+@@ -561,7 +634,7 @@ fn rows(ui: &mut Ui, range: std::ops::Range<usize>, h: Listed<'_>, sample: Optio
+         let name = match row {
+             Row::Style(_, style) => style.clone(),
+             Row::Family(f) => db.family_display_name(f, look.english_names),
+-            Row::Heading(_) => continue,
++            Row::Heading(_) | Row::Local(_) | Row::LocalNote(..) => continue,
+         };
+         ui.painter_at(name_rect).text(name_rect.left_center(), egui::Align2::LEFT_CENTER, name, egui::FontId::proportional(12.0), t.text);
+         let sample_rect = egui::Rect::from_min_max(rect.min + vec2(name_w, 2.0), rect.max - vec2(STAR + 2.0, 2.0));
+diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
+index 48410bb..03d258c 100644
+--- a/crates/ui-egui/src/lib.rs
++++ b/crates/ui-egui/src/lib.rs
+@@ -37,6 +37,8 @@ pub mod dialogs;
+ pub mod dock;
+ // Hanpan: `?embedded=hanpan`, the host page owns the files
+ pub mod embedded;
++// Hanpan: the PC's fonts in the font menus (embedded web build)
++pub mod local_fonts;
+ mod edit_toolbar;
+ pub mod export_progress;
+ pub mod find_font;
+diff --git a/crates/ui-egui/src/local_fonts.rs b/crates/ui-egui/src/local_fonts.rs
+new file mode 100644
+index 0000000..d83c5bc
+--- /dev/null
++++ b/crates/ui-egui/src/local_fonts.rs
+@@ -0,0 +1,206 @@
++//! Hanpan: fonts installed on the user's PC, for the web build in embedded mode (`?embedded=hanpan`).
++//! The font menus show them in their own section, "이 PC의 글꼴". The web shell lists them with the
++//! browser's Local Font Access API (`window.queryLocalFonts()`) the first time a font menu opens,
++//! and reads a family's files when one is picked there; this module is the state between the menus
++//! and the shell. Off (and empty) unless the shell calls [`enable`].
++
++use std::sync::{Mutex, MutexGuard, PoisonError};
++
++/// The section's heading in the font menus.
++pub const HEADING: &str = "이 PC의 글꼴";
++
++/// Where the list of the PC's font families is.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub enum Listing {
++    /// Not asked for yet: the first font menu that opens asks.
++    NotAsked,
++    /// Asked for, not yet taken by the shell ([`take_list_request`]), or being read.
++    Pending,
++    /// The PC's families, sorted, each once.
++    Listed(Vec<String>),
++    /// The browser refused or has no Local Font Access (the reason, for the menu).
++    Failed(String),
++}
++
++/// A family picked in the section.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub enum Load {
++    /// Waiting for the shell, or being read.
++    Loading,
++    /// In the app's fonts: the family names its files registered.
++    Loaded(Vec<String>),
++    Failed(String),
++}
++
++struct State {
++    enabled: bool,
++    listing: Listing,
++    list_requested: bool,
++    /// Families picked, not yet taken by the shell.
++    requested: Vec<String>,
++    loads: Vec<(String, Load)>,
++    /// Bumped on every change, so menus build their rows again.
++    generation: u64,
++}
++
++static STATE: Mutex<State> =
++    Mutex::new(State { enabled: false, listing: Listing::NotAsked, list_requested: false, requested: Vec::new(), loads: Vec::new(), generation: 0 });
++
++fn state() -> MutexGuard<'static, State> {
++    STATE.lock().unwrap_or_else(PoisonError::into_inner)
++}
++
++/// The shell turns the section on (embedded mode, in a browser).
++pub fn enable() {
++    let mut s = state();
++    s.enabled = true;
++    s.generation = s.generation.wrapping_add(1);
++}
++
++/// Do the font menus show the section?
++pub fn enabled() -> bool {
++    state().enabled
++}
++
++/// Changes whenever anything here does.
++pub fn generation() -> u64 {
++    state().generation
++}
++
++pub fn listing() -> Listing {
++    state().listing.clone()
++}
++
++/// Asks the shell for the list: once, or again after it failed.
++pub fn ask_list() {
++    let mut s = state();
++    if s.enabled && matches!(s.listing, Listing::NotAsked | Listing::Failed(_)) {
++        s.listing = Listing::Pending;
++        s.list_requested = true;
++        s.generation = s.generation.wrapping_add(1);
++    }
++}
++
++/// For the shell: should it read the list now? True once per [`ask_list`].
++pub fn take_list_request() -> bool {
++    std::mem::take(&mut state().list_requested)
++}
++
++/// For the shell: the families it read, or why it could not.
++pub fn listed(result: Result<Vec<String>, String>) {
++    let mut s = state();
++    s.listing = match result {
++        Ok(mut families) => {
++            families.sort_by_key(|f| f.to_lowercase());
++            families.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
++            Listing::Listed(families)
++        }
++        Err(e) => Listing::Failed(e),
++    };
++    s.generation = s.generation.wrapping_add(1);
++}
++
++/// Asks the shell to load `family`'s files into the app's fonts. Asking again is harmless; a
++/// family that failed is tried again.
++pub fn request(family: &str) {
++    let mut s = state();
++    if !s.enabled {
++        return;
++    }
++    match s.loads.iter().position(|(f, _)| f == family) {
++        Some(i) if !matches!(s.loads[i].1, Load::Failed(_)) => return,
++        Some(i) => s.loads[i].1 = Load::Loading,
++        None => s.loads.push((family.to_string(), Load::Loading)),
++    }
++    s.requested.push(family.to_string());
++    s.generation = s.generation.wrapping_add(1);
++}
++
++/// For the shell: the families to load now.
++pub fn take_requests() -> Vec<String> {
++    std::mem::take(&mut state().requested)
++}
++
++/// For the shell: `family` is loaded (the names its files registered) or failed.
++pub fn finished(family: &str, result: Result<Vec<String>, String>) {
++    let mut s = state();
++    let load = match result {
++        Ok(names) => Load::Loaded(names),
++        Err(e) => Load::Failed(e),
++    };
++    match s.loads.iter_mut().find(|(f, _)| f == family) {
++        Some(entry) => entry.1 = load,
++        None => s.loads.push((family.to_string(), load)),
++    }
++    s.generation = s.generation.wrapping_add(1);
++}
++
++/// Where `family`'s load is, if it was picked.
++pub fn load_of(family: &str) -> Option<Load> {
++    state().loads.iter().find(|(f, _)| f == family).map(|(_, l)| l.clone())
++}
++
++/// The families of the PC to list for `query` (lowercase; empty: all): those the app does not
++/// have already (`known`, compared ignoring case).
++pub fn families_for(query: &str, known: &[String]) -> Vec<String> {
++    let Listing::Listed(all) = listing() else { return Vec::new() };
++    all.into_iter()
++        .filter(|f| query.is_empty() || f.to_lowercase().contains(query))
++        .filter(|f| !known.iter().any(|k| k.eq_ignore_ascii_case(f)))
++        .collect()
++}
++
++/// The line the section shows instead of families, if any, and whether clicking it asks for the
++/// list again.
++pub fn note() -> Option<(String, bool)> {
++    match listing() {
++        Listing::NotAsked => Some(("이 PC의 글꼴 불러오기".into(), true)),
++        Listing::Pending => Some(("이 PC의 글꼴을 읽는 중…".into(), false)),
++        Listing::Listed(_) => None,
++        Listing::Failed(e) => Some((format!("이 PC의 글꼴을 읽지 못했습니다 ({e}). 눌러서 다시 시도"), true)),
++    }
++}
++
++/// What a family's row says after its name while it loads or when it failed.
++pub fn suffix(family: &str) -> Option<String> {
++    match load_of(family)? {
++        Load::Loading => Some("불러오는 중…".into()),
++        Load::Loaded(_) => None,
++        Load::Failed(e) => Some(format!("실패: {e}")),
++    }
++}
++
++/// The page API's `fonts.local` request (`window.<app>.request('fonts.local', params)`), so the
++/// host's AI can use the PC's fonts too. Without `family`: asks for the list once and answers where
++/// it is (`{listing: "pending" | "listed" | "failed", families?, error?}`). With `family`: asks for
++/// that family to load and answers where that is (`{family, status: "loading" | "loaded" |
++/// "failed", names?, error?}`; `names` are the families its files registered, to set text in).
++/// Ask again until the answer is no longer pending or loading.
++pub fn control(params: &serde_json::Value) -> Result<serde_json::Value, String> {
++    use serde_json::json;
++    if !enabled() {
++        return Err("the PC's fonts are only offered in embedded mode (embedded=hanpan)".into());
++    }
++    match params.get("family").and_then(serde_json::Value::as_str) {
++        None => {
++            ask_list();
++            Ok(match listing() {
++                Listing::NotAsked | Listing::Pending => json!({"listing": "pending"}),
++                Listing::Listed(families) => json!({"listing": "listed", "families": families}),
++                Listing::Failed(e) => json!({"listing": "failed", "error": e}),
++            })
++        }
++        Some(family) => {
++            match listing() {
++                Listing::Listed(all) if all.iter().any(|f| f == family) => request(family),
++                Listing::Listed(_) => return Err(format!("no font family {family:?} on this PC")),
++                _ => return Err("the PC's fonts are not listed yet: call fonts.local without a family first".into()),
++            }
++            Ok(match load_of(family) {
++                Some(Load::Loaded(names)) => json!({"family": family, "status": "loaded", "names": names}),
++                Some(Load::Failed(e)) => json!({"family": family, "status": "failed", "error": e}),
++                _ => json!({"family": family, "status": "loading"}),
++            })
++        }
++    }
++}

@@ -1,0 +1,894 @@
+diff --git a/apps/vectorcraft-web/src/web.rs b/apps/vectorcraft-web/src/web.rs
+index a47ff7e199b4137fe30f09ba62bd650ae03fad17..01795f9cd12d08a669834a74142eda79dd3bd1e9 100644
+--- a/apps/vectorcraft-web/src/web.rs
++++ b/apps/vectorcraft-web/src/web.rs
+@@ -122,7 +122,8 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
+                 let stylus = host.pointers.borrow().stylus();
+                 let services = services(host.inbox.clone(), host.place_inbox.clone(), ctx.clone(), host.locks.clone(), stylus);
+                 // Hanpan: `?embedded=hanpan`, the host page owns the files (vectorcraft_ui_egui::embedded)
+-                let services = Services { embedded: vectorcraft_ui_egui::embedded::requested(&query()), ..services };
++                let embedded = vectorcraft_ui_egui::embedded::requested(&query());
++                let services = Services { embedded, host_request: embedded.then(host_request_service), ..services };
+                 // Hanpan: embedded mode lists the PC's fonts in the font menus (crate::local_fonts)
+                 if services.embedded {
+                     vectorcraft_ui_egui::local_fonts::enable();
+@@ -187,6 +188,10 @@ fn detect_language() {
+         tags.extend(navigator.language());
+     }
+     i18n::set_system_locales(tags.as_slice());
++    // Hanpan: <html lang> follows the language the interface starts in (Korean line breaking, screen readers)
++    if let Some(root) = web_sys::window().and_then(|w| w.document()).and_then(|d| d.document_element()) {
++        let _ = root.set_attribute("lang", i18n::system_lang().code());
++    }
+     if let Some(el) = element(LOADING_ID) {
+         el.set_text_content(Some(i18n::message(i18n::system_lang(), "Loading VectorCraft…").as_str()));
+     }
+@@ -665,3 +670,15 @@ fn print_pdf(pdf: &[u8]) -> Result<(), String> {
+     document.body().ok_or("no body")?.append_child(&frame).map_err(js_err)?;
+     Ok(())
+ }
++
++/// Hanpan: Save, Save As and Print in embedded mode ask the host page: a `hanpan-host-<request>`
++/// event on the window, which the host's agent in this frame passes on (the page has no files).
++fn host_request_service() -> Box<dyn Fn(&str)> {
++    Box::new(|request: &str| {
++        if let Some(window) = web_sys::window()
++            && let Ok(event) = web_sys::Event::new(&format!("hanpan-host-{request}"))
++        {
++            let _ = window.dispatch_event(&event);
++        }
++    })
++}
+diff --git a/crates/engine/src/cmd/newdoc.rs b/crates/engine/src/cmd/newdoc.rs
+index d8f0681cc026e8b38a7c82099851083fb65a4392..8425bd1de0aad3b7353438be760ab382690888df 100644
+--- a/crates/engine/src/cmd/newdoc.rs
++++ b/crates/engine/src/cmd/newdoc.rs
+@@ -549,9 +549,14 @@ pub fn category_names() -> impl Iterator<Item = &'static str> {
+ 
+ /// The built-in presets of one category: screen sizes in pixels, the others in `general`
+ /// (Preferences ▸ Units ▸ General).
+-fn builtin(c: &Category, general: Unit) -> impl Iterator<Item = DocSettings> + '_ {
+-    let (_, color_mode, ppi, presets) = *c;
+-    presets.iter().map(move |&(name, w, h, units)| DocSettings {
++fn builtin(c: &Category, general: Unit, metric: bool) -> impl Iterator<Item = DocSettings> + '_ {
++    let (category, color_mode, ppi, presets) = *c;
++    // 한판 W9: 미터법 화면 언어에서는 인쇄 프리셋이 A4부터, RGB로(사무용 프린터·화면용), 크기는 mm로.
++    let print = metric && category == "Print";
++    let color_mode = if print { ColorMode::Rgb } else { color_mode };
++    let general = if metric && general == Unit::Points { Unit::Millimeters } else { general };
++    let a4_first = presets.iter().filter(move |p| print && p.0 == "A4").chain(presets.iter().filter(move |p| !(print && p.0 == "A4")));
++    a4_first.map(move |&(name, w, h, units)| DocSettings {
+         name: name.into(),
+         width: units.to_pt(w),
+         height: units.to_pt(h),
+@@ -570,7 +575,7 @@ pub fn category(s: &Session, name: &str) -> Option<Vec<DocSettings>> {
+     if name.eq_ignore_ascii_case("Saved") {
+         return Some(s.prefs.new_doc_presets.clone());
+     }
+-    CATEGORIES.iter().find(|c| c.0.eq_ignore_ascii_case(name)).map(|c| builtin(c, s.default_units()).collect())
++    CATEGORIES.iter().find(|c| c.0.eq_ignore_ascii_case(name)).map(|c| builtin(c, s.default_units(), s.metric_interface()).collect())
+ }
+ 
+ /// A preset by name (any case): a saved one first, then the built-in ones.
+@@ -581,12 +586,18 @@ pub fn find(s: &Session, name: &str) -> Option<DocSettings> {
+         .iter()
+         .find(|p| p.name.eq_ignore_ascii_case(name))
+         .cloned()
+-        .or_else(|| CATEGORIES.iter().flat_map(|c| builtin(c, s.default_units())).find(|p| p.name.eq_ignore_ascii_case(name)))
++        .or_else(|| CATEGORIES.iter().flat_map(|c| builtin(c, s.default_units(), s.metric_interface())).find(|p| p.name.eq_ignore_ascii_case(name)))
+ }
+ 
+ impl Session {
+     /// New Document's starting settings: Letter in Preferences ▸ Units ▸ General.
+     fn default_settings(&self) -> DocSettings {
++        // 한판 W9: 한국어·베트남어 화면은 A4(mm)로 시작한다.
++        if self.metric_interface()
++            && let Some(a4) = find(self, "A4")
++        {
++            return a4;
++        }
+         DocSettings { units: self.default_units(), ..DocSettings::default() }
+     }
+ }
+diff --git a/crates/engine/src/session/execute.rs b/crates/engine/src/session/execute.rs
+index f4ebd87c425f12257fde9c56f6925279aea603a6..b5d03e281e8a4b17c4a735303d5735b4618b2fb8 100644
+--- a/crates/engine/src/session/execute.rs
++++ b/crates/engine/src/session/execute.rs
+@@ -135,6 +135,13 @@ impl Session {
+         self.ui_language.as_deref().unwrap_or(&self.prefs.interface_language).eq_ignore_ascii_case("ja")
+     }
+ 
++    /// 한판 W9: 화면 언어가 A4·mm 용지를 쓰는 곳(한국어, 베트남어)인가. 새 문서가 A4(mm)로 시작하고
++    /// 인쇄 프리셋이 A4를 맨 앞에 두고 RGB로 만든다.
++    pub fn metric_interface(&self) -> bool {
++        let lang = self.ui_language.as_deref().unwrap_or(&self.prefs.interface_language);
++        lang.eq_ignore_ascii_case("ko") || lang.eq_ignore_ascii_case("vi")
++    }
++
+     /// Record `key: value` in the running top-level command's journal entry (or its interaction's
+     /// preview, or its step in a batch) unless its params give `key`: a value it resolved from the
+     /// preferences or the clock.
+diff --git a/crates/engine/src/tests/newdoc.rs b/crates/engine/src/tests/newdoc.rs
+index 067631eeca28eb7ec491cad83ccd1186b8ee9cd1..e236e0cf3df829874b24e30743b2da84a8c7ba97 100644
+--- a/crates/engine/src/tests/newdoc.rs
++++ b/crates/engine/src/tests/newdoc.rs
+@@ -404,3 +404,27 @@ fn rearrange_that_moves_no_artboard_records_no_undo_step() {
+     assert_eq!(s.execute("artboard.rearrange", &p).unwrap(), json!({"artboards": 0, "rows": 1, "columns": 1}));
+     assert_eq!(history(&s), before);
+ }
++
++/// 한판 W9: 한국어·베트남어 화면에서는 새 문서 기본이 A4(mm), 인쇄 프리셋은 A4가 맨 앞이고 mm로
++/// 보이며 RGB로 만든다(사무용 프린터·화면 공유용). 영어 화면은 레터·pt·CMYK 그대로다.
++#[test]
++fn korean_interface_starts_on_a4_in_millimetres_and_rgb() {
++    let mut s = Session::new();
++    s.ui_language = Some("ko".into());
++    let print = presets(&mut s, "Print");
++    assert_eq!(print[0]["name"], "A4");
++    assert_eq!(print.len(), 8);
++    assert_eq!(print[0]["units"], "Millimeters");
++    assert_eq!(print[0]["colorMode"], "rgb");
++    s.execute("file.new", &json!({})).unwrap();
++    let d = &s.doc().unwrap().doc;
++    assert_eq!((d.units, d.color_mode), (Unit::Millimeters, ColorMode::Rgb));
++    assert!((boards(&s)[0].width() - 595.2756).abs() < 0.01, "A4 width");
++    s.execute("file.new", &json!({"preset": "Letter"})).unwrap();
++    assert_eq!(s.doc().unwrap().doc.color_mode, ColorMode::Rgb);
++
++    let mut s = Session::new();
++    s.ui_language = Some("en".into());
++    let print = presets(&mut s, "Print");
++    assert_eq!((print[0]["name"].as_str(), print[0]["colorMode"].as_str()), (Some("Letter"), Some("cmyk")));
++}
+diff --git a/crates/text/src/fontdb/traits.rs b/crates/text/src/fontdb/traits.rs
+index b6244b81d9d3659cff192f4d90495855ee9053bd..eaeda3404b41d4ac3a7492c6789654a6606c5ead 100644
+--- a/crates/text/src/fontdb/traits.rs
++++ b/crates/text/src/fontdb/traits.rs
+@@ -95,6 +95,8 @@ impl FontClass {
+ #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+ pub struct FontTraits {
+     pub japanese: bool,
++    /// Hanpan: its character map has Hangul syllables (가 and 한).
++    pub korean: bool,
+     /// Its character map has Thai (ก and า).
+     pub thai: bool,
+     pub class: FontClass,
+@@ -118,6 +120,7 @@ impl FontTraits {
+         // Hiragana (bit 49) or Katakana (bit 50) in the Unicode ranges, or the JIS code page.
+         let japanese = ranges2 & (0b11 << 17) != 0 || codepages & (1 << 17) != 0 || has_japanese_name;
+         let thai = ['\u{0E01}', '\u{0E32}'].iter().all(|c| font.charmap().map(*c).is_some());
++        let korean = ['\u{AC00}', '\u{D55C}'].iter().all(|c| font.charmap().map(*c).is_some());
+         let family_type = panose.first().copied().unwrap_or(0);
+         let serif_style = panose.get(1).copied().unwrap_or(0);
+         let proportion = panose.get(3).copied().unwrap_or(0);
+@@ -216,7 +219,7 @@ impl FontTraits {
+             FontClass::Other
+         };
+         let variable = (1..=MAX_AXES).contains(&font.axes().len());
+-        FontTraits { japanese, thai, class, variable }
++        FontTraits { japanese, korean, thai, class, variable }
+     }
+ }
+ 
+diff --git a/crates/ui-egui/src/canvas.rs b/crates/ui-egui/src/canvas.rs
+index e501273d59e79b54bd78ff0f9d1246799d467779..c5350a2c072bcb2ccb67ae122b5717e658d6ad26 100644
+--- a/crates/ui-egui/src/canvas.rs
++++ b/crates/ui-egui/src/canvas.rs
+@@ -791,7 +791,7 @@ fn artboard_edges(
+             // At the artboard's own top-left corner, which a rotated view turns away from its
+             // bounding box's (#1095).
+             let corner = xf.to_screen(Point::new(ab.rect.x0, ab.rect.y0));
+-            artboard_label(painter, corner, (ab.rect.width() * xf.zoom) as f32, &format!("{:02} - {}", i + 1, ab.name), t.text_dim);
++            artboard_label(painter, corner, (ab.rect.width() * xf.zoom) as f32, &format!("{:02} - {}", i + 1, crate::i18n::default_name(crate::i18n::current(), &ab.name)), t.text_dim);
+         }
+     }
+ }
+diff --git a/crates/ui-egui/src/canvas/artboards.rs b/crates/ui-egui/src/canvas/artboards.rs
+index 2e62fff4a34f56f4e430210d4d33eecd34dc984d..5f278a3baea1ca46c712fb4156c98e6db59f7c71 100644
+--- a/crates/ui-egui/src/canvas/artboards.rs
++++ b/crates/ui-egui/src/canvas/artboards.rs
+@@ -117,7 +117,7 @@ pub(super) fn artboard_name_at(app: &VectorcraftApp, ui: &Ui, xf: &Xf, screen: P
+         }
+         let corner = xf.to_screen(Point::new(ab.rect.x0, ab.rect.y0));
+         let width = (ab.rect.width() * xf.zoom) as f32;
+-        let text = format!("{:02} - {}", i + 1, ab.name);
++        let text = format!("{:02} - {}", i + 1, crate::i18n::default_name(crate::i18n::current(), &ab.name));
+         if canvas_name_rect(painter, corner, width, &text).is_some_and(|r| r.contains(screen)) {
+             hit = Some(i);
+         }
+diff --git a/crates/ui-egui/src/canvas/home.rs b/crates/ui-egui/src/canvas/home.rs
+index bdbabdcd81db9c43574e246d207faaa253aac064..c4a6311dcec14341938ce048e878d2407e2cda1a 100644
+--- a/crates/ui-egui/src/canvas/home.rs
++++ b/crates/ui-egui/src/canvas/home.rs
+@@ -58,10 +58,13 @@ fn home_content(app: &mut VectorcraftApp, ui: &mut Ui) {
+             }
+         }
+     });
+-    ui.add_space(28.0);
+-    ui.label(egui::RichText::new(tl!("Community")).font(theme::semibold(14.0)).color(t.text));
+-    ui.add_space(10.0);
+-    crate::community::links(app, ui);
++    // Hanpan: no links out of the app in embedded mode
++    if !app.services.embedded {
++        ui.add_space(28.0);
++        ui.label(egui::RichText::new(tl!("Community")).font(theme::semibold(14.0)).color(t.text));
++        ui.add_space(10.0);
++        crate::community::links(app, ui);
++    }
+ }
+ 
+ /// The Home screen's Recent Files (#663): the first of File › Open Recent Files, each its name and
+diff --git a/crates/ui-egui/src/chrome.rs b/crates/ui-egui/src/chrome.rs
+index db68f6d318ef49bf168ecff56c70addf42ce4f2c..ed659778e0e62033ef811e1e5441d668994b0530 100644
+--- a/crates/ui-egui/src/chrome.rs
++++ b/crates/ui-egui/src/chrome.rs
+@@ -139,7 +139,7 @@ pub fn system_title_bar(app: &VectorcraftApp) -> bool {
+ pub fn window_title(app: &VectorcraftApp) -> String {
+     app.session
+         .active()
+-        .map(|d| format!("{}{} \u{2014} VectorCraft", if d.is_dirty() { "*" } else { "" }, d.title()))
++        .map(|d| format!("{}{} \u{2014} VectorCraft", if d.is_dirty() { "*" } else { "" }, crate::i18n::default_name(crate::i18n::current(), &d.title())))
+         .unwrap_or_else(|| "VectorCraft".into())
+ }
+ 
+diff --git a/crates/ui-egui/src/chrome/tabs.rs b/crates/ui-egui/src/chrome/tabs.rs
+index a8824b9f0c284f683e04835e387906dc29cb2af8..00ccb5e116f3a912e5074c510d3dc012f0f89070 100644
+--- a/crates/ui-egui/src/chrome/tabs.rs
++++ b/crates/ui-egui/src/chrome/tabs.rs
+@@ -9,7 +9,7 @@ pub(super) fn tab_title(d: &vectorcraft_engine::DocState, zoom: f64, outline: bo
+         let color = if d.doc.color_mode == vectorcraft_doc::ColorMode::Cmyk { "CMYK" } else { "RGB" };
+         format!("{color}/{}", if outline { tl!("Outline") } else { tl!("Preview") })
+     };
+-    format!("{}{} @ {} ({mode})", d.title(), if d.is_dirty() { "*" } else { "" }, zoom_label(zoom, display_print_size).replace('%', " %"))
++    format!("{}{} @ {} ({mode})", crate::i18n::default_name(crate::i18n::current(), &d.title()), if d.is_dirty() { "*" } else { "" }, zoom_label(zoom, display_print_size).replace('%', " %"))
+ }
+ 
+ /// The title of open document `i`'s tab, with its own view's zoom and Outline or Preview.
+@@ -277,7 +277,7 @@ pub(super) fn artboard_list(app: &VectorcraftApp, ui: &mut Ui, cur: usize) -> Op
+     const ROWS: f32 = 10.0;
+     let t = Tokens::get(ui.ctx());
+     let boards = app.session.active().map(|d| d.doc.artboards.as_slice()).unwrap_or_default();
+-    let shown = boards.get(cur).map_or_else(|| "–".to_string(), |a| format!("{}  {}", cur + 1, a.name));
++    let shown = boards.get(cur).map_or_else(|| "–".to_string(), |a| format!("{}  {}", cur + 1, crate::i18n::default_name(crate::i18n::current(), &a.name)));
+     // Under `drawn`, egui's temp data stores the pass the list was last drawn in.
+     let drawn = ui.scope_id().with("artboard-list");
+     let height = ROW_H * ROWS;
+@@ -322,7 +322,7 @@ pub(super) fn artboard_list(app: &VectorcraftApp, ui: &mut Ui, cur: usize) -> Op
+                                 t.text_dim,
+                             );
+                             let name_start = number_end + 10.0;
+-                            let name = egui::WidgetText::from(egui::RichText::new(&board.name).size(12.5)).into_galley(
++                            let name = egui::WidgetText::from(egui::RichText::new(crate::i18n::default_name(crate::i18n::current(), &board.name)).size(12.5)).into_galley(
+                                 ui,
+                                 Some(egui::TextWrapMode::Truncate),
+                                 r.right() - 8.0 - name_start,
+diff --git a/crates/ui-egui/src/dialogs/missing_fonts.rs b/crates/ui-egui/src/dialogs/missing_fonts.rs
+index e95a3302fcef74e3febf6ea8e698595089060398..a90760b888692dfa43dd45399f61b4a2b21988f9 100644
+--- a/crates/ui-egui/src/dialogs/missing_fonts.rs
++++ b/crates/ui-egui/src/dialogs/missing_fonts.rs
+@@ -52,7 +52,8 @@ fn after_open_for(app: &mut VectorcraftApp, r: &Value, web: bool) {
+     let Some(st) = app.session.active() else { return };
+     let uid = st.uid;
+     if web {
+-        let n = vectorcraft_engine::cmd::fontfiles::missing_fonts(&st.doc).len();
++        // Hanpan: a family the PC has is loaded from it (embedded mode, `crate::local_fonts`)
++        let n = vectorcraft_engine::cmd::fontfiles::missing_fonts(&st.doc).iter().filter(|f| !crate::local_fonts::want(&f.family)).count();
+         if n > 0 && r["warnings"].as_array().is_none_or(Vec::is_empty) {
+             app.status(crate::i18n::msg_n(
+                 n as u64,
+diff --git a/crates/ui-egui/src/dialogs/new_document.rs b/crates/ui-egui/src/dialogs/new_document.rs
+index 5d53ebe73e80be00c445a57842d74889f6a31fd6..fc550cc413fce2f139182b41927ed9dce71dff6c 100644
+--- a/crates/ui-egui/src/dialogs/new_document.rs
++++ b/crates/ui-egui/src/dialogs/new_document.rs
+@@ -70,7 +70,9 @@ const HEIGHT: f32 = 600.0;
+ pub fn open(app: &mut VectorcraftApp) {
+     let category = if app.session.prefs.recent_new_docs.is_empty() { "Print" } else { "Recent" };
+     let first = newdoc::category(&app.session, category).and_then(|v| v.into_iter().next()).unwrap_or_default();
+-    let mut d = Dialog::new(KIND, json!({ "category": category, "name": app.session.peek_untitled(), "advanced": false }));
++    // 한판: 이름 칸은 화면 언어로("제목 없음-1"); 만들 때 `params`가 엔진의 이름으로 되돌린다.
++    let name = crate::i18n::default_name(crate::i18n::current(), &app.session.peek_untitled()).into_owned();
++    let mut d = Dialog::new(KIND, json!({ "category": category, "name": name, "advanced": false }));
+     apply(&mut d, &first);
+     app.ui.dialog = Some(d);
+ }
+@@ -139,6 +141,11 @@ pub fn create_without_dialog(app: &mut VectorcraftApp) -> Result<Value, String>
+ /// The `file.new` params of the fields.
+ fn params(app: &VectorcraftApp, d: &Dialog) -> Map<String, Value> {
+     let mut p: Map<String, Value> = PARAMS.iter().filter_map(|k| Some((k.to_string(), d.fields.get(*k)?.clone()))).collect();
++    // 한판: 화면 언어로 보인 기본 이름 그대로면 엔진의 "Untitled-N"을 넘긴다(번호를 쓰고, 내보내기 때 파일 이름을 따른다).
++    let peek = app.session.peek_untitled();
++    if p.get("name").and_then(Value::as_str) == Some(&*crate::i18n::default_name(crate::i18n::current(), &peek)) {
++        p.insert("name".into(), json!(peek));
++    }
+     // Recent entries such as "Custom" aren't presets file.new knows.
+     if newdoc::find(&app.session, &d.str("preset")).is_none() {
+         p.remove("preset");
+@@ -951,4 +958,24 @@ mod tests {
+         assert_eq!((field(&app, "category"), field(&app, "preset"), field(&app, super::SAVING)), (json!("Saved"), json!("Strip"), json!(false)));
+         assert_eq!(app.ui.dialog.as_ref().unwrap().kind, super::MORE, "More Settings stays open");
+     }
++
++    /// 한판 W2·W9: 한국어 화면은 이름 칸에 "제목 없음-1"을, 인쇄 분류의 A4(mm)를 보인다. 그대로 만들면 엔진은
++    /// "Untitled-1"을 받아 번호를 쓰고(다음은 "제목 없음-2"), 탭에는 화면 언어로 보인다.
++    #[test]
++    fn korean_dialog_offers_a_localized_name_and_a4() {
++        let mut app = VectorcraftApp::new(Session::new(), Default::default());
++        // 한 프레임이 하듯 화면 언어를 엔진과 이 스레드에 알린다.
++        app.session.ui_language = Some("ko".into());
++        crate::i18n::set_current(crate::i18n::Lang::from_code("ko").unwrap());
++        app.run("file.newDialog", json!({})).unwrap();
++        frame(&mut app);
++        assert_eq!((field(&app, "category"), field(&app, "preset"), field(&app, "name")), (json!("Print"), json!("A4"), json!("제목 없음-1")));
++        assert_eq!((field(&app, "units"), field(&app, "colorMode")), (json!("Millimeters"), json!("rgb")));
++        crate::dialogs::confirm(&mut app).unwrap();
++        assert_eq!(app.session.active().unwrap().doc.title, "Untitled-1", "the engine keeps its own name");
++        app.run("file.newDialog", json!({})).unwrap();
++        assert_eq!(field(&app, "name"), json!("제목 없음-2"));
++        frame(&mut app);
++        crate::i18n::set_current(crate::i18n::Lang::EN);
++    }
+ }
+diff --git a/crates/ui-egui/src/embedded.rs b/crates/ui-egui/src/embedded.rs
+index 206e5f83430709f7510a1b388b4bc4441d7167c1..dd1f691833b577822a5dfcf35663f962bd77ce70 100644
+--- a/crates/ui-egui/src/embedded.rs
++++ b/crates/ui-egui/src/embedded.rs
+@@ -1,7 +1,9 @@
+ //! Hanpan: embedded mode (`?embedded=hanpan` in the page address). The host page owns the files:
+ //! it hands VectorCraft the document and takes the saves, so Open, Open Recent, Close and Close
+ //! All are off, and New only makes the first document (from the Home screen). Save, Save As and
+-//! Export stay as they are. The page API (`app.open`, `app.save`) is not gated: the host drives it.
++//! Print from the menus and their keys are the host's: they ask the host page (an event on the
++//! window, [`host_request`]) and write nothing themselves. Export stays as it is. The page API
++//! (`app.open`, `app.save`) is not gated: the host drives it.
+ 
+ /// Does the page query (`location.search`, with or without its `?`) ask for embedded mode?
+ pub fn requested(query: &str) -> bool {
+@@ -12,11 +14,27 @@ pub fn requested(query: &str) -> bool {
+ pub fn blocks(id: &str, has_document: bool) -> bool {
+     match id {
+         "file.open" | "file.close" | "file.closeAll" | "file.clearRecent" => true,
++        // the host page owns the file and the window: nothing saved or shown inside the page, no
++        // quitting, no links out of the app, no update check of a build the host ships
++        "file.reveal" | "file.recentFiles" | "file.saveCopy" | "file.saveAsTemplate" | "file.export.pdf" | "document.exportForOffice" | "file.revert" | "app.quit"
++        | "help.github" | "help.checkForUpdates" => true,
+         "file.new" | "file.newDialog" | "file.newWithoutDialog" | "file.newFromTemplate" => has_document,
+         id => id.starts_with("file.openRecent"),
+     }
+ }
+ 
++/// The host's request a command makes in embedded mode, instead of running: Save, Save As and
++/// Print go to the host page, which writes the file with its own dialog (or prints) and only then
++/// marks the document saved. The page sees the window event `hanpan-host-<request>`.
++pub fn host_request(id: &str) -> Option<&'static str> {
++    Some(match id {
++        "file.save" => "save",
++        "file.saveAs" => "saveAs",
++        "file.print" => "print",
++        _ => return None,
++    })
++}
++
+ /// Is command `id` gone from the menus in embedded mode (off whatever the documents)?
+ pub fn hides(id: &str) -> bool {
+     blocks(id, false)
+@@ -50,4 +68,15 @@ mod tests {
+             assert!(!blocks(id, true), "{id}");
+         }
+     }
++
++    #[test]
++    fn save_and_print_ask_the_host_and_links_out_are_gone() {
++        assert_eq!(host_request("file.save"), Some("save"));
++        assert_eq!(host_request("file.saveAs"), Some("saveAs"));
++        assert_eq!(host_request("file.print"), Some("print"));
++        assert_eq!(host_request("file.exportAs"), None);
++        for id in ["file.reveal", "file.saveCopy", "file.export.pdf", "document.exportForOffice", "app.quit", "help.github", "help.checkForUpdates"] {
++            assert!(blocks(id, true) && hides(id), "{id}");
++        }
++    }
+ }
+diff --git a/crates/ui-egui/src/font_menu.rs b/crates/ui-egui/src/font_menu.rs
+index 378b1e73af06e728a558206bbac6d518dd29aafc..877bdd11f456ce92e0a0d4685a4aa0f314b4bade 100644
+--- a/crates/ui-egui/src/font_menu.rs
++++ b/crates/ui-egui/src/font_menu.rs
+@@ -91,8 +91,8 @@ const SAMPLES_PER_FRAME: usize = 4;
+ const MAX_PENDING: usize = 8;
+ /// What a sample shows when the font lacks the selected text's characters (or there is none).
+ const FALLBACK_SAMPLE: &str = "Sample";
+-/// The script filter's choices: all, Japanese, Latin, Thai.
+-const SCRIPTS: usize = 4;
++/// The script filter's choices: all, Japanese, Latin, Thai, Korean (Hanpan).
++const SCRIPTS: usize = 5;
+ 
+ fn script_label(i: usize) -> &'static str {
+     match i {
+@@ -100,6 +100,7 @@ fn script_label(i: usize) -> &'static str {
+         1 => crate::i18n::tr_ctx(crate::i18n::current(), "font-script", "Japanese"),
+         2 => tl!("Latin"),
+         3 => tl!("Thai"),
++        4 => tl!("Korean"),
+         _ => tl!("All Scripts"),
+     }
+ }
+@@ -117,6 +118,7 @@ fn script_matches(script: usize, traits: vectorcraft_text::FontTraits) -> bool {
+         1 => traits.japanese,
+         2 => !traits.japanese && !traits.thai,
+         3 => traits.thai,
++        4 => traits.korean,
+         _ => true,
+     }
+ }
+diff --git a/crates/ui-egui/src/i18n.rs b/crates/ui-egui/src/i18n.rs
+index 689eb2015f401563ea8d309ac3af0f122062babb..8e59e3d93e757af8d49b88c29a3326676560b0a1 100644
+--- a/crates/ui-egui/src/i18n.rs
++++ b/crates/ui-egui/src/i18n.rs
+@@ -765,3 +765,19 @@ mod picker_order_tests {
+         assert_eq!(name_sort_key("Łącza"), "lacza");
+     }
+ }
++
++/// 한판 W2: 엔진이 영어로 짓는 기본 이름("Untitled-1", "Layer 1", "Artboard 1")을 `lang`으로 보여 준다.
++/// 문서에 저장되는 이름은 그대로 두고(파일 호환, `has_own_title`, 자동화) 그릴 때만 바꾼다.
++pub fn default_name(lang: Lang, name: &str) -> std::borrow::Cow<'_, str> {
++    use std::borrow::Cow;
++    let number = |rest: &str| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit());
++    if let Some(n) = name.strip_prefix("Untitled-").filter(|n| number(n)) {
++        return Cow::Owned(format!("{}-{n}", tr(lang, "Untitled")));
++    }
++    for (prefix, template) in [("Layer ", "Layer {number}"), ("Artboard ", "Artboard {number}")] {
++        if let Some(n) = name.strip_prefix(prefix).filter(|n| number(n)) {
++            return Cow::Owned(fmt(tr(lang, template), &[("number", n)]));
++        }
++    }
++    Cow::Borrowed(name)
++}
+diff --git a/crates/ui-egui/src/i18n/ko.tsv b/crates/ui-egui/src/i18n/ko.tsv
+index 2ca382be9e53ed30b79c9263b364941cf1539e74..832561674cd8b9d79e01d27f38b2dc7f1e305e33 100644
+--- a/crates/ui-egui/src/i18n/ko.tsv
++++ b/crates/ui-egui/src/i18n/ko.tsv
+@@ -11,11 +11,11 @@
+ 	Edge Brightness	가장자리 밝기
+ 	Smoothness	부드러움
+ 	About VectorCraft	VectorCraft 정보
+-	All Scripts	모든 스크립트
++	All Scripts	모든 문자
+ 	Anchors:	앵커:
+ 	Any Kind	모든 종류
+-	Font Technology	글꼴 기술
+-font-technology	Variable	가변
++	Font Technology	글꼴 형식
++font-technology	Variable	가변 글꼴
+ 	Ascender	어센더
+ 	Baseline	기준선
+ 	Bottom-to-Bottom Leading	아래쪽 기준 행간
+@@ -71,6 +71,7 @@ digits	Malayalam	말라얄람어
+ 	Soft	약하게
+ 	Latin	라틴어
+ 	Thai	태국어
++	Korean	한국어
+ 	Monospaced	고정폭
+ 	Roman Baseline	로마자 기준선
+ 	Rounded	둥근체
+@@ -139,7 +140,7 @@ digits	Malayalam	말라얄람어
+ 	Paste in Front	앞에 붙여넣기
+ 	Paste in Back	뒤에 붙여넣기
+ 	Paste in Place	제자리에 붙여넣기
+-	Paste on All Artboards	모든 아트보드에 붙여넣기
++	Paste on All Artboards	각 아트보드에 붙이기
+ 	Paste without Formatting	서식 없이 붙여넣기
+ 	Clear	지우기
+ 	Find and Replace…	찾기 및 바꾸기…
+@@ -632,7 +633,7 @@ digits	Malayalam	말라얄람어
+ 	Saved View 23	저장된 보기 23
+ 	Saved View 24	저장된 보기 24
+ 	Saved View 25	저장된 보기 25
+-	Window	윈도우
++	Window	창
+ 	New Window	새 창
+ 	Next Document	다음 문서
+ 	Previous Document	이전 문서
+@@ -641,7 +642,7 @@ digits	Malayalam	말라얄람어
+ 	Float in Window	창에 플로팅
+ 	Consolidate All Windows	모든 창 통합
+ 	Workspace	작업 영역
+-	Reset Essentials	Essentials 재설정
++	Reset Essentials	필수 재설정
+ 	New Workspace…	새 작업 영역…
+ 	New Toolbar…	새 도구 막대…
+ 	New Toolbar	새 도구 막대
+@@ -822,8 +823,8 @@ digits	Malayalam	말라얄람어
+ 	 over paths to roughen their outlines  |  	 패스 위에서 윤곽선 거칠게 만들기  |  
+ 	 over paths, and hold still to keep going  |  	 패스 위에서 멈춰 있으면 계속 진행  |  
+ 	 the art to add a pin  |  	 아트워크를 클릭하여 핀 추가  |  
+-	 the object to duplicate	 복제할 개체
+-	 the object to select  |  	 선택할 개체  |  
++	 the object to duplicate	 개체 복제
++	 the object to select  |  	 개체 선택  |  
+ 	 to add	 추가
+ 	 to add a corner point  |  	 모퉁이 점 추가  |  
+ 	 to add a smooth point  |  	 부드러운 점 추가  |  
+@@ -3657,7 +3658,7 @@ file-filter	Templates	템플릿
+ 	Right-Justified Tab	오른쪽 정렬 탭
+ 	Rotate 90° CW	시계 방향 90° 회전
+ 	Same As Source	원본과 동일
+-	Saved	저장했습니다
++	Saved	저장됨
+ 	Saved recovery data for {title}	{title}의 복구 데이터를 저장했습니다
+ 	Saved to User Defined: {}	사용자 정의에 저장했습니다: {}
+ 	Saved {n} files beside {path}	{path} 옆에 파일 {n}개를 저장했습니다
+@@ -5817,3 +5818,22 @@ breakText	Glyphs	글리프
+ 	Create Swatch Legend	견본 범례 만들기
+ 	Create Swatch Legend…	견본 범례 만들기…
+ 	HEX	HEX
++# 한판 웹판: 남은 영어 화면 문구와 기본 이름
++	Mobile	모바일
++	Web	웹
++	Film & Video	필름 및 비디오
++	Art & Illustration	아트 및 일러스트레이션
++	Branding	브랜딩
++	Social	소셜
++	Legal	리걸
++	Tabloid	타블로이드
++	Layer {number}	레이어 {number}
++	Essentials	필수
++	Essentials Classic	필수 클래식
++	Automation	자동화
++	Layout	레이아웃
++	Painting	페인팅
++	Printing and Proofing	인쇄 및 교정
++	Tracing	따라 그리기
++	Typography	타이포그래피
++	Check for Updates…	업데이트 확인…
+diff --git a/crates/ui-egui/src/i18n/tests.rs b/crates/ui-egui/src/i18n/tests.rs
+index ae1a4f708e806884d834ab46d7d559557045c60f..3229ec240f0996287da5df22cecb5aab9eebbde3 100644
+--- a/crates/ui-egui/src/i18n/tests.rs
++++ b/crates/ui-egui/src/i18n/tests.rs
+@@ -1286,6 +1286,12 @@ fn kept_menu_names_are_menu_labels_left_in_english() {
+     for keep in MENU_KEEP_AS_IS {
+         assert!(labels.iter().any(|(l, ..)| l == keep), "`{keep}` isn't a menu label");
+         for code in KEEPS_MENU_NAMES {
++            // 한판: 한국어·베트남어는 기본 작업 영역 이름과 새 문서 분류(Web)를 번역한다(UX 점검 W2).
++            const HANPAN_TRANSLATED: [&str; 9] =
++                ["Essentials", "Essentials Classic", "Automation", "Layout", "Painting", "Printing and Proofing", "Tracing", "Typography", "Web"];
++            if matches!(code, "ko" | "vi") && HANPAN_TRANSLATED.contains(keep) {
++                continue;
++            }
+             assert!(!has(Lang::from_code(code).expect("registered"), keep), "{code}: `{keep}` is both kept and translated");
+         }
+     }
+@@ -2229,3 +2235,16 @@ fn every_catalog_names_the_digits_menus_numeral_systems() {
+     }
+     assert!(missing.is_empty(), "Digits menu labels without a row:\n{}", missing.join("\n"));
+ }
++
++/// 한판 W2: 엔진이 영어로 짓는 기본 이름(문서·레이어·아트보드)은 그릴 때 화면 언어로 바뀐다.
++/// 사용자가 지은 이름과 영어 화면은 그대로다.
++#[test]
++fn default_names_show_in_the_interface_language() {
++    let ko = Lang::from_code("ko").expect("ko registered");
++    assert_eq!(default_name(ko, "Untitled-3"), "제목 없음-3");
++    assert_eq!(default_name(ko, "Layer 1"), "레이어 1");
++    assert_eq!(default_name(ko, "Artboard 2"), "아트보드 2");
++    assert_eq!(default_name(ko, "Layer one"), "Layer one");
++    assert_eq!(default_name(ko, "Untitled-"), "Untitled-");
++    assert_eq!(default_name(Lang::EN, "Layer 1"), "Layer 1");
++}
+diff --git a/crates/ui-egui/src/i18n/vi.tsv b/crates/ui-egui/src/i18n/vi.tsv
+index 4b26f15485eb3c6fbab89ebd0206e2c5f7a7dc61..32e90dbb2a08cc7e8438956c4d212a37205519f5 100644
+--- a/crates/ui-egui/src/i18n/vi.tsv
++++ b/crates/ui-egui/src/i18n/vi.tsv
+@@ -3753,6 +3753,7 @@ mark-style	Japanese	Kiểu Nhật
+ 	Texturizer	Texturizer
+ 	Texturizer…	Texturizer…
+ 	Thai	Tiếng Thái
++	Korean	Tiếng Hàn
+ 	The bounds of the visible art.	Vùng giới hạn của đối tượng hiển thị.
+ 	The plug-in writes the whole document.	Plug-in xuất toàn bộ tài liệu.
+ 	The cell shows the type object's text as HTML.	Ô hiển thị văn bản của đối tượng chữ dưới dạng HTML.
+@@ -5837,3 +5838,20 @@ breakText	Glyphs	Glyph
+ 	Create Swatch Legend	Tạo chú giải mẫu màu
+ 	Create Swatch Legend…	Tạo chú giải mẫu màu…
+ 	HEX	HEX
++# Hanpan web build
++	Mobile	Di động
++	Web	Web
++	Film & Video	Phim & Video
++	Art & Illustration	Nghệ thuật & Minh họa
++	Branding	Thương hiệu
++	Social	Mạng xã hội
++	Layer {number}	Lớp {number}
++	Essentials	Cơ bản
++	Essentials Classic	Cơ bản cổ điển
++	Automation	Tự động hóa
++	Layout	Bố cục
++	Painting	Vẽ màu
++	Printing and Proofing	In và kiểm bản
++	Tracing	Đồ họa theo ảnh
++	Typography	Kiểu chữ
++	Check for Updates…	Kiểm tra cập nhật…
+diff --git a/crates/ui-egui/src/local_fonts.rs b/crates/ui-egui/src/local_fonts.rs
+index d83c5bc9c7f7af920bdbc4c31394bfdf066ca030..13c67dc356cee151fcd9079d1a4e2725f250bbff 100644
+--- a/crates/ui-egui/src/local_fonts.rs
++++ b/crates/ui-egui/src/local_fonts.rs
+@@ -39,12 +39,22 @@ struct State {
+     /// Families picked, not yet taken by the shell.
+     requested: Vec<String>,
+     loads: Vec<(String, Load)>,
++    /// Families an opened document uses, waiting for the list to be loaded if the PC has them.
++    wanted: Vec<String>,
+     /// Bumped on every change, so menus build their rows again.
+     generation: u64,
+ }
+ 
+ static STATE: Mutex<State> =
+-    Mutex::new(State { enabled: false, listing: Listing::NotAsked, list_requested: false, requested: Vec::new(), loads: Vec::new(), generation: 0 });
++    Mutex::new(State {
++    enabled: false,
++    listing: Listing::NotAsked,
++    list_requested: false,
++    requested: Vec::new(),
++    loads: Vec::new(),
++    wanted: Vec::new(),
++    generation: 0,
++});
+ 
+ fn state() -> MutexGuard<'static, State> {
+     STATE.lock().unwrap_or_else(PoisonError::into_inner)
+@@ -93,6 +103,15 @@ pub fn listed(result: Result<Vec<String>, String>) {
+         Ok(mut families) => {
+             families.sort_by_key(|f| f.to_lowercase());
+             families.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
++            // the families an opened document waited for: those the PC has load now
++            for want in std::mem::take(&mut s.wanted) {
++                if let Some(f) = families.iter().find(|f| f.eq_ignore_ascii_case(&want)).cloned()
++                    && !s.loads.iter().any(|(l, _)| *l == f)
++                {
++                    s.loads.push((f.clone(), Load::Loading));
++                    s.requested.push(f);
++                }
++            }
+             Listing::Listed(families)
+         }
+         Err(e) => Listing::Failed(e),
+@@ -116,6 +135,35 @@ pub fn request(family: &str) {
+     s.generation = s.generation.wrapping_add(1);
+ }
+ 
++/// A family an opened document uses that the app does not have: loaded from the PC if the PC has
++/// it (once the list is read). True when it is (or may yet be) loaded, so the document's "font not
++/// installed" warning is not shown for it.
++pub fn want(family: &str) -> bool {
++    let mut s = state();
++    if !s.enabled {
++        return false;
++    }
++    match &s.listing {
++        Listing::Listed(all) => {
++            let Some(f) = all.iter().find(|f| f.eq_ignore_ascii_case(family)).cloned() else { return false };
++            drop(s);
++            request(&f);
++            true
++        }
++        _ => {
++            if !s.wanted.iter().any(|w| w.eq_ignore_ascii_case(family)) {
++                s.wanted.push(family.to_string());
++            }
++            if !matches!(s.listing, Listing::Pending) {
++                s.listing = Listing::Pending;
++                s.list_requested = true;
++            }
++            s.generation = s.generation.wrapping_add(1);
++            true
++        }
++    }
++}
++
+ /// For the shell: the families to load now.
+ pub fn take_requests() -> Vec<String> {
+     std::mem::take(&mut state().requested)
+@@ -145,11 +193,55 @@ pub fn load_of(family: &str) -> Option<Load> {
+ pub fn families_for(query: &str, known: &[String]) -> Vec<String> {
+     let Listing::Listed(all) = listing() else { return Vec::new() };
+     all.into_iter()
+-        .filter(|f| query.is_empty() || f.to_lowercase().contains(query))
++        .filter(|f| query.is_empty() || matches_query(f, query))
+         .filter(|f| !known.iter().any(|k| k.eq_ignore_ascii_case(f)))
+         .collect()
+ }
+ 
++/// Korean names of the Korean fonts Windows and common packages install, as the browser lists
++/// them by their English family name: "맑은" finds Malgun Gothic.
++pub const KOREAN_NAMES: &[(&str, &str)] = &[
++    ("Malgun Gothic", "맑은 고딕"),
++    ("Gulim", "굴림"),
++    ("GulimChe", "굴림체"),
++    ("Dotum", "돋움"),
++    ("DotumChe", "돋움체"),
++    ("Batang", "바탕"),
++    ("BatangChe", "바탕체"),
++    ("Gungsuh", "궁서"),
++    ("GungsuhChe", "궁서체"),
++    ("NanumGothic", "나눔고딕"),
++    ("NanumGothicCoding", "나눔고딕코딩"),
++    ("NanumMyeongjo", "나눔명조"),
++    ("NanumBarunGothic", "나눔바른고딕"),
++    ("NanumSquare", "나눔스퀘어"),
++    ("NanumPen", "나눔손글씨 펜"),
++    ("Nanum Pen Script", "나눔손글씨 펜"),
++    ("Nanum Brush Script", "나눔손글씨 붓"),
++    ("HCR Batang", "함초롬바탕"),
++    ("HCR Dotum", "함초롬돋움"),
++    ("HYGothic-Extra", "HY견고딕"),
++    ("HYHeadLine-Medium", "HY헤드라인M"),
++    ("HYMyeongJo-Extra", "HY견명조"),
++    ("Noto Sans KR", "노토 산스 KR"),
++    ("Noto Serif KR", "노토 세리프 KR"),
++    ("Spoqa Han Sans Neo", "스포카 한 산스 네오"),
++    ("Pretendard", "프리텐다드"),
++];
++
++/// The Korean name of a PC font family, if it has a known one.
++pub fn korean_name(family: &str) -> Option<&'static str> {
++    KOREAN_NAMES.iter().find(|(en, _)| en.eq_ignore_ascii_case(family)).map(|(_, ko)| *ko)
++}
++
++/// Does `family` answer the search `query` (lowercase), by its own name or its Korean one? Spaces
++/// do not count: "맑은고딕" and "malgungothic" find it too.
++pub fn matches_query(family: &str, query: &str) -> bool {
++    let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_lowercase();
++    let q = squash(query);
++    q.is_empty() || squash(family).contains(&q) || korean_name(family).is_some_and(|ko| squash(ko).contains(&q))
++}
++
+ /// The line the section shows instead of families, if any, and whether clicking it asks for the
+ /// list again.
+ pub fn note() -> Option<(String, bool)> {
+@@ -204,3 +296,18 @@ pub fn control(params: &serde_json::Value) -> Result<serde_json::Value, String>
+         }
+     }
+ }
++
++#[cfg(test)]
++mod hanpan_search_tests {
++    use super::*;
++
++    #[test]
++    fn korean_names_find_the_pc_font() {
++        assert!(matches_query("Malgun Gothic", "맑은"));
++        assert!(matches_query("Malgun Gothic", "맑은고딕"));
++        assert!(matches_query("Malgun Gothic", "malgun"));
++        assert!(matches_query("Malgun Gothic", "malgungothic"));
++        assert!(!matches_query("Gulim", "맑은"));
++        assert_eq!(korean_name("malgun gothic"), Some("맑은 고딕"));
++    }
++}
+diff --git a/crates/ui-egui/src/menus/entries.rs b/crates/ui-egui/src/menus/entries.rs
+index e9cfc538a13c94eb20980e0f9e49a11b8a07079d..b793d452a457a2bc93779663a44a5255f0f2bb98 100644
+--- a/crates/ui-egui/src/menus/entries.rs
++++ b/crates/ui-egui/src/menus/entries.rs
+@@ -33,6 +33,13 @@ pub fn entry<'a>(app: &VectorcraftApp, it: &'a Item) -> Option<Entry<'a>> {
+     Some(match it {
+         Item::Sep => Entry::Sep,
+         Item::Header(h) => Entry::Header(t(h)),
++        // Hanpan: a submenu embedded mode empties (Open Recent Files) is gone
++        Item::Sub(_, children)
++            if app.services.embedded
++                && !children.iter().any(|c| matches!(c, Item::Cmd(..) | Item::Sub(..) | Item::Todo(..)) && entry(app, c).is_some()) =>
++        {
++            return None;
++        }
+         Item::Sub(label, children) => Entry::Sub(t(label), children),
+         Item::Todo(label, sc) => Entry::Item(Row {
+             command: None,
+diff --git a/crates/ui-egui/src/menus/invoke.rs b/crates/ui-egui/src/menus/invoke.rs
+index 9d3af237d5e4c82a327e532b0b32ae9bf0ed717c..21da6565732a7a38474cd17ccfe0d6a5acadc023 100644
+--- a/crates/ui-egui/src/menus/invoke.rs
++++ b/crates/ui-egui/src/menus/invoke.rs
+@@ -129,6 +129,17 @@ pub fn invoke(app: &mut VectorcraftApp, id: &str, p: Value) {
+     if waits_for_ime(app, id) || (app.services.embedded && crate::embedded::blocks(id, app.session.active().is_some())) {
+         return;
+     }
++    // Hanpan: Save, Save As and Print are the host page's; nothing is written or said here
++    if app.services.embedded
++        && let Some(request) = crate::embedded::host_request(id)
++    {
++        if app.session.active().is_some()
++            && let Some(ask) = app.services.host_request.as_ref()
++        {
++            ask(request);
++        }
++        return;
++    }
+     if SUBJECT_COMMANDS.contains(&id)
+         && p.get("ids").is_none_or(|ids| ids.as_array().is_some_and(Vec::is_empty))
+         && p.get("id").is_none()
+diff --git a/crates/ui-egui/src/menus/state.rs b/crates/ui-egui/src/menus/state.rs
+index 9fcf47062e9f02d2db2cdc2d3f2b6b85585d8d82..656782dde946a7dd03572f31161263ec3ca8b713 100644
+--- a/crates/ui-egui/src/menus/state.rs
++++ b/crates/ui-egui/src/menus/state.rs
+@@ -183,6 +183,10 @@ pub fn enabled(app: &VectorcraftApp, id: &str) -> bool {
+     if waits_for_ime(app, id) || (app.services.embedded && crate::embedded::blocks(id, app.session.active().is_some())) {
+         return false;
+     }
++    // Hanpan: the host saves and prints whatever document is open
++    if app.services.embedded && crate::embedded::host_request(id).is_some() {
++        return app.session.active().is_some();
++    }
+     if SUBJECT_COMMANDS.contains(&id) {
+         return has_subject(app);
+     }
+diff --git a/crates/ui-egui/src/panels/layers/model.rs b/crates/ui-egui/src/panels/layers/model.rs
+index bbafbb7559bd90d9cae2f3f422784715fa5aa680..f1eb20df027ad690c2af6a3c3ed17c5cccf8f869 100644
+--- a/crates/ui-egui/src/panels/layers/model.rs
++++ b/crates/ui-egui/src/panels/layers/model.rs
+@@ -27,6 +27,10 @@ pub(super) fn painted_name(n: &Node, name: &str, lang: crate::i18n::Lang) -> Str
+     if generated && let Some(inner) = name.strip_prefix('<').and_then(|s| s.strip_suffix('>')) {
+         return format!("<{}>", crate::i18n::tr(lang, inner));
+     }
++    // 한판: 엔진이 영어로 지은 "Layer 1"은 화면 언어로 보인다(저장되는 이름은 그대로).
++    if n.is_layer() {
++        return crate::i18n::default_name(lang, name).into_owned();
++    }
+     name.to_string()
+ }
+ 
+diff --git a/crates/ui-egui/src/services.rs b/crates/ui-egui/src/services.rs
+index d9032831b2a723ddf3870bb920e78f1c3ff430e1..8c871d2634703034b5ebfa195de20ee02135bae1 100644
+--- a/crates/ui-egui/src/services.rs
++++ b/crates/ui-egui/src/services.rs
+@@ -70,6 +70,8 @@ pub type RevealFn = Box<dyn FnMut(&str) -> Result<(), String>>;
+ pub struct Services {
+     /// Hanpan: embedded in a host page that owns the files (`crate::embedded`).
+     pub embedded: bool,
++    /// Hanpan: asks the host page for a save, save-as or print (`crate::embedded::host_request`).
++    pub host_request: Option<Box<dyn Fn(&str)>>,
+     /// Show an open dialog; returns a path.
+     pub pick_open: Option<PickOpen>,
+     /// Show a save dialog (suggested name, folder, file types); returns a path.
+diff --git a/crates/ui-egui/src/toolbar.rs b/crates/ui-egui/src/toolbar.rs
+index 1061d6c7fde5e5bc437a3b21a73bfae3d3be843e..3bede84370bbb0a641c74e53ad4a76a80bc7e9ec 100644
+--- a/crates/ui-egui/src/toolbar.rs
++++ b/crates/ui-egui/src/toolbar.rs
+@@ -95,15 +95,24 @@ pub fn remember(app: &mut VectorcraftApp, id: &str) {
+     crate::custom_toolbars::remember(&mut app.ui, id);
+ }
+ 
++/// Does one column of the toolbar's `slots` (with group labels when `labels`, and the controls
++/// under the tools) fit in `height`?
++pub(crate) fn single_column_fits(slots: &[(Option<&'static str>, Vec<&'static str>)], labels: bool, height: f32) -> bool {
++    let groups = slots.iter().filter(|(cat, _)| cat.is_some()).count();
++    let tools = slots.len() as f32 * 38.0 + if labels { groups as f32 * 18.0 } else { 0.0 };
++    tools + 230.0 <= height
++}
++
+ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
+     let t = Tokens::get(ui.ctx());
+-    // The user's choice alone: a window too short for the tools scrolls them.
+-    let cols = if app.ui.toolbar_double { 2 } else { 1 };
++    // Where the panel docks: along the window's left edge, under the bars.
++    let edge = ui.available_rect_before_wrap();
++    // The user's choice: a window too short for the tools scrolls them. Hanpan: embedded in a short
++    // window (1366×768) the tools at the bottom (Hand, Zoom) would be cut off, so two columns then.
++    let cols = if app.ui.toolbar_double || (app.services.embedded && !single_column_fits(&slots(app), app.session.prefs.tool_group_labels, edge.height())) { 2 } else { 1 };
+     // Two 36 pt buttons with 2 pt either side inside the border and separator line (at 76 they
+     // overran the right border).
+     let w = if cols == 2 { 80.0 } else { WIDTH };
+-    // Where the panel docks: along the window's left edge, under the bars.
+-    let edge = ui.available_rect_before_wrap();
+     ui.ctx().data_mut(|d| d.insert_temp(crate::tools_float::tools_zone_id(), egui::Rect::from_min_size(edge.min, vec2(WIDTH, edge.height()))));
+     match app.ui.toolbar_pos {
+         None => {
+@@ -966,3 +975,13 @@ fn puppet_warp_options(app: &mut VectorcraftApp, ui: &mut Ui) {
+ 
+ #[cfg(test)]
+ pub(crate) mod tests;
++
++#[cfg(test)]
++mod hanpan_fit_tests {
++    #[test]
++    fn a_short_window_does_not_fit_one_column_and_a_tall_one_does() {
++        let slots: Vec<(Option<&'static str>, Vec<&'static str>)> = (0..18).map(|i| (if i % 4 == 0 { Some("Group") } else { None }, vec!["tool"])).collect();
++        assert!(!super::single_column_fits(&slots, true, 640.0));
++        assert!(super::single_column_fits(&slots, true, 1200.0));
++    }
++}

@@ -1,0 +1,938 @@
+diff --git a/apps/photocraft-web/src/web.rs b/apps/photocraft-web/src/web.rs
+index 4d963041e6b392af88ab238bbea03f502b772255..24a60b7e71a23fb2dc97b94db1600579ecf3a785 100644
+--- a/apps/photocraft-web/src/web.rs
++++ b/apps/photocraft-web/src/web.rs
+@@ -103,7 +103,7 @@ pub fn start() {
+                     let (session, warnings) = crate::preset_bridge::session(presets.clone());
+                     preset_warnings.extend(warnings);
+                     let drag = listen_drag(&pen_target);
+-                    let services = Services { embedded, ..services(inbox.clone(), place_inbox.clone(), drag_pos_service(pen_target.clone(), drag)) };
++                    let services = Services { embedded, host_request: embedded.then(host_request_service), ..services(inbox.clone(), place_inbox.clone(), drag_pos_service(pen_target.clone(), drag)) };
+                     let mut app = PhotocraftApp::new(session, services);
+                     // `window.photocraft`: the page's control channel (crate::api).
+                     let (control_tx, control_rx) = std::sync::mpsc::channel();
+@@ -326,6 +326,10 @@ impl WebShell {
+         if ui_language != self.ui_language {
+             self.ui_language = ui_language;
+             served_fonts::request_for_languages([ui_language]);
++            // Hanpan: <html lang> follows the interface language (Korean line breaking, screen readers)
++            if let Some(root) = web_sys::window().and_then(|w| w.document()).and_then(|d| d.document_element()) {
++                let _ = root.set_attribute("lang", ui_language);
++            }
+         }
+         let requested = served_fonts::take_requests();
+         // Hanpan: files of the PC's fonts picked in a font menu install as served ones do
+@@ -623,3 +627,14 @@ fn screen_color_service() -> Option<photocraft_ui_egui::screen_picker::Service>
+         Pending { receiver: rx, cancelled }
+     }))
+ }
++
++/// Hanpan: Save, Save As and Print in embedded mode ask the host page: a `hanpan-host-<request>`
++/// event on the window, which the host's agent in this frame passes on (the page has no files).
++fn host_request_service() -> photocraft_ui_egui::OpenUrlFn {
++    Box::new(|request: &str| {
++        let window = web_sys::window().ok_or("no window")?;
++        let event = web_sys::Event::new(&format!("hanpan-host-{request}")).map_err(|_| "cannot make the event".to_string())?;
++        window.dispatch_event(&event).map_err(|_| "cannot reach the host".to_string())?;
++        Ok(())
++    })
++}
+diff --git a/crates/ui-egui/src/app/control.rs b/crates/ui-egui/src/app/control.rs
+index 1032873c567e244e6d8746b93a3a78ad0b3475c9..fd6e06b3f19669c2b2a253a07fc822c29ce708b1 100644
+--- a/crates/ui-egui/src/app/control.rs
++++ b/crates/ui-egui/src/app/control.rs
+@@ -28,7 +28,18 @@ impl PhotocraftApp {
+                 let _ = reply.send(serde_json::json!({"ok": false, "error": crate::control::expired_error()}));
+                 continue;
+             }
+-            match crate::control::handle(self, ctx, &req) {
++            // Hanpan: a request of the host page that fails is the host's to tell, in its own words:
++            // the engine's English error is not left on the status line (embedded mode)
++            let status_before = self.services.embedded.then(|| (self.ui.status.clone(), self.ui.status_error));
++            let outcome = crate::control::handle(self, ctx, &req);
++            if let Some((status, error)) = status_before
++                && self.ui.status_error
++                && self.ui.status != status
++            {
++                self.ui.status = status;
++                self.ui.status_error = error;
++            }
++            match outcome {
+                 crate::control::Outcome::Done(v) => {
+                     let _ = reply.send(v);
+                 }
+diff --git a/crates/ui-egui/src/canvas/start_screen.rs b/crates/ui-egui/src/canvas/start_screen.rs
+index 6c749c92937410a86de92b48e3b3e2d03fb85816..c5ab1da322526d0c0642447cbc845edb0f7d5ecd 100644
+--- a/crates/ui-egui/src/canvas/start_screen.rs
++++ b/crates/ui-egui/src/canvas/start_screen.rs
+@@ -34,7 +34,8 @@ pub(super) fn start_screen(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+         ui.vertical_centered(|ui| {
+             ui.horizontal(|ui| {
+                 let title = ui.painter().layout_no_wrap(tl!("PhotoCraft").into(), crate::theme::semibold(38.0), t.text);
+-                let by = ui.painter().layout_no_wrap(tl!("open source").into(), egui::FontId::proportional(13.0), t.text_faint);
++                let by_text = if app.services.embedded { "" } else { tl!("open source") };
++                let by = ui.painter().layout_no_wrap(by_text.into(), egui::FontId::proportional(13.0), t.text_faint);
+                 let total = title.size().x + by.size().x + 10.0;
+                 ui.add_space(((card.width() - total) / 2.0).max(0.0));
+                 let (r, _) = ui.allocate_exact_size(title.size(), Sense::hover());
+@@ -84,8 +85,11 @@ pub(super) fn start_screen(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+                 ui.add_space(22.0);
+                 home_recent(app, ui, &recent);
+             }
+-            ui.add_space(26.0);
+-            crate::links::link_row(app, ui);
++            // Hanpan: no links out of the app in embedded mode
++            if !app.services.embedded {
++                ui.add_space(26.0);
++                crate::links::link_row(app, ui);
++            }
+         });
+     });
+ }
+diff --git a/crates/ui-egui/src/control/export_image.rs b/crates/ui-egui/src/control/export_image.rs
+index 00dc743a6e9dae0c3254295c6065909cf9c4c4ee..977a4a9bfb7e8c98052a0ea077c5027311b760fb 100644
+--- a/crates/ui-egui/src/control/export_image.rs
++++ b/crates/ui-egui/src/control/export_image.rs
+@@ -1,5 +1,5 @@
+ //! `app.exportImage {format?, maxSide?, quality?}` (Hanpan): the active document's composite as
+-//! PNG or JPEG bytes, for a caller that wants the picture and not a file. Nothing is written or
++//! PNG or JPEG bytes (or, with `format: "psd"`, the layered document), for a caller that wants the picture and not a file. Nothing is written or
+ //! downloaded, and the document keeps its revision, path and modified flag; the status line and
+ //! the notices are not touched. Reply: `{dataBase64, width, height, format}`.
+ 
+@@ -14,6 +14,15 @@ const MAX_SIDE: u64 = 16_384;
+ const JPEG_QUALITY: u8 = 85;
+ 
+ pub(super) fn export_image(app: &PhotocraftApp, p: &Value) -> Result<Value, String> {
++    // Hanpan: `{format: "psd"}` is the whole layered document (the host keeps it as a recovery
++    // copy), with the same promise: nothing written, the document's state untouched.
++    if p.get("format").and_then(Value::as_str) == Some("psd") {
++        let state = app.session.active().ok_or("no document")?;
++        let export = app.services.export.as_ref().ok_or("no exporter configured")?;
++        let settings = ExportSettings { read_linked_files: false, ..ExportSettings::default() };
++        let (bytes, _warnings) = export(&state.doc, "recovery.psd", &settings)?;
++        return Ok(json!({"dataBase64": base64::engine::general_purpose::STANDARD.encode(&bytes), "format": "psd"}));
++    }
+     let jpeg = match p.get("format").map(|v| v.as_str()) {
+         None | Some(Some("png")) => false,
+         Some(Some("jpeg" | "jpg")) => true,
+diff --git a/crates/ui-egui/src/dialogs.rs b/crates/ui-egui/src/dialogs.rs
+index 3c02855f97784e3ff326786cca1945082f03c7c5..81a1cfb55e48a6a07d5b84b351b80d7998c42bd8 100644
+--- a/crates/ui-egui/src/dialogs.rs
++++ b/crates/ui-egui/src/dialogs.rs
+@@ -1058,7 +1058,12 @@ pub fn confirm(app: &mut PhotocraftApp, id: u64) -> Result<Value, String> {
+     let d = app.ui.close_dialog(id).ok_or_else(|| format!("no dialog {id}"))?;
+     match d.kind {
+         DialogKind::NewDocument => {
+-            let r = app.run("file.new", crate::new_doc_ui::command_params(&d.fields));
++            let mut params = crate::new_doc_ui::command_params(&d.fields);
++            // 대화상자는 영어 기본 이름을 상태에 두고 칸에만 번역해 보인다. 만들 때도 화면 언어 이름으로.
++            if params.get("name").and_then(Value::as_str) == Some("Untitled-1") {
++                params["name"] = json!(tl!("Untitled-1"));
++            }
++            let r = app.run("file.new", params);
+             if let Some(i) = app.session.active_index() {
+                 app.ui.views[i].fit_pending = true;
+             }
+diff --git a/crates/ui-egui/src/dialogs/new_doc_ui.rs b/crates/ui-egui/src/dialogs/new_doc_ui.rs
+index f662842e1e29d80e0a986018967226370ca31c48..5a6f4ddd8cabf5ecfac5db0a28619f4be9d3bede 100644
+--- a/crates/ui-egui/src/dialogs/new_doc_ui.rs
++++ b/crates/ui-egui/src/dialogs/new_doc_ui.rs
+@@ -195,11 +195,36 @@ fn preset_unit(p: &Preset, f: &Map<String, Value>) -> String {
+         "px".into()
+     } else if unit != "px" && UNITS.iter().any(|u| u.0 == unit) {
+         unit
++    } else if metric_ui() {
++        "mm".into()
+     } else {
+         "in".into()
+     }
+ }
+ 
++/// 한판 W9: 미터법을 쓰는 화면 언어(한국어, 베트남어)인가.
++fn metric_ui() -> bool {
++    matches!(crate::i18n::current().code(), "ko" | "vi")
++}
++
++/// 한 분류의 기본 프리셋을 보일 순서로. 미터법 화면 언어에서는 A4를 맨 앞에 두고, 최근 항목의 첫
++/// 기본 카드("Default PhotoCraft Size", 7 x 5 in)도 A4로 바꾼다.
++pub(crate) fn presets_for(cat: &str, list: &[Preset]) -> Vec<Preset> {
++    let mut v = list.to_vec();
++    if metric_ui() {
++        if cat == CATEGORIES[0].0
++            && let Some(d) = v.iter_mut().find(|p| p.0 == "Default PhotoCraft Size")
++        {
++            *d = ("A4", 2480, 3508, 300.0);
++        }
++        if let Some(i) = v.iter().position(|p| p.0 == "A4") {
++            let a4 = v.remove(i);
++            v.insert(0, a4);
++        }
++    }
++    v
++}
++
+ /// A built-in preset at Preferences › Units & Rulers › New Document Preset Resolutions, as in
+ /// Photoshop: a print preset keeps its size in inches at the Print Resolution (Letter at 200 ppi is
+ /// 1700 x 2200 px), a screen preset keeps its pixels at the Screen Resolution. The Clipboard preset
+@@ -429,11 +454,11 @@ impl Card {
+ fn recent_cards(f: &Map<String, Value>, recent: &[DocumentSettings], units: &UnitsAndRulers) -> Vec<Card> {
+     let mut cards: Vec<Card> = clipboard_preset(f).map(Card::Builtin).into_iter().collect();
+     cards.extend(recent.iter().cloned().map(Card::Recent));
+-    let defaults = CATEGORIES[0].1.iter().filter(|p| {
++    let defaults = presets_for(CATEGORIES[0].0, CATEGORIES[0].1).into_iter().filter(|p| {
+         let (_, w, h, ppi) = at_pref_resolutions(p, units);
+         !recent.iter().any(|s| (s.width, s.height, s.resolution) == (w, h, ppi))
+     });
+-    cards.extend(defaults.copied().map(Card::Builtin));
++    cards.extend(defaults.map(Card::Builtin));
+     cards
+ }
+ 
+@@ -554,7 +579,7 @@ pub fn body(app: &mut crate::PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<Strin
+     ui.add_space(8.0);
+     let units = app.session.prefs().units_and_rulers.clone();
+     let presets: Vec<Card> = match CATEGORIES.iter().find(|c| c.0 == cat) {
+-        Some(c) if c.0 != CATEGORIES[0].0 => c.1.iter().copied().map(Card::Builtin).collect(),
++        Some(c) if c.0 != CATEGORIES[0].0 => presets_for(c.0, c.1).into_iter().map(Card::Builtin).collect(),
+         _ => recent_cards(f, &app.session.presets.recent_documents, &units),
+     };
+     let presets: Vec<Card> = presets
+diff --git a/crates/ui-egui/src/dialogs/new_doc_ui/tests.rs b/crates/ui-egui/src/dialogs/new_doc_ui/tests.rs
+index 6dbe011439ace36fc2d52af4717b73e7057b83bf..1b05f09b656fa702731d589d321c753a4edd2c56 100644
+--- a/crates/ui-egui/src/dialogs/new_doc_ui/tests.rs
++++ b/crates/ui-egui/src/dialogs/new_doc_ui/tests.rs
+@@ -903,3 +903,23 @@ mod dialog {
+         }
+     }
+ }
++
++/// 한판 W9: 한국어·베트남어 화면은 A4를 맨 앞(최근 항목의 첫 기본 카드, 인쇄의 첫 카드)에 두고 인쇄
++/// 크기를 mm로 보인다. 영어 화면은 원래대로다.
++#[test]
++fn metric_languages_put_a4_first_in_millimetres() {
++    let print = CATEGORIES.iter().find(|c| c.0 == "Print").unwrap().1;
++    let f = crate::state::UiState::new_document_fields();
++    let ko = crate::i18n::Lang::from_code("ko").unwrap();
++    crate::i18n::with_language(ko, || {
++        assert_eq!(presets_for("Print", print)[0].0, "A4");
++        assert_eq!(presets_for("Print", print).len(), print.len());
++        assert_eq!(presets_for("Recent", CATEGORIES[0].1)[0].0, "A4");
++        assert_eq!(preset_unit(&presets_for("Print", print)[0], &f), "mm");
++    });
++    crate::i18n::with_language(crate::i18n::Lang::EN, || {
++        assert_eq!(presets_for("Print", print)[0].0, "Letter");
++        assert_eq!(presets_for("Recent", CATEGORIES[0].1)[0].0, "Default PhotoCraft Size");
++        assert_eq!(preset_unit(&print[0], &f), "in");
++    });
++}
+diff --git a/crates/ui-egui/src/embedded.rs b/crates/ui-egui/src/embedded.rs
+index 6097ab29529d8cedb519f60ae738bc8ccf1f5ea9..711dd8b1450e183a3d8733a80d08ec33c58257fb 100644
+--- a/crates/ui-egui/src/embedded.rs
++++ b/crates/ui-egui/src/embedded.rs
+@@ -1,7 +1,9 @@
+ //! Hanpan: embedded mode (`?embedded=hanpan` in the page address). The host page owns the files:
+ //! it hands PhotoCraft the document and takes the saves, so Open, Open Recent, Close and Close All
+ //! are off, and New only makes the first document (from the start screen). Save, Save As and
+-//! Export stay as they are. The page API's engine commands are not gated: the host drives them.
++//! Print from the menus and their keys are the host's: they ask the host page (an event on the
++//! window, [`host_request`]) and write nothing themselves. Export stays as it is. The page API's
++//! engine commands are not gated: the host drives them.
+ 
+ /// Does the page query (`location.search`, with or without its `?`) ask for embedded mode?
+ pub fn requested(query: &str) -> bool {
+@@ -12,11 +14,26 @@ pub fn requested(query: &str) -> bool {
+ pub fn blocks(id: &str, has_document: bool) -> bool {
+     match id {
+         "file.open" | "file.openAs" | "file.close" | "file.closeAll" | "file.closeOthers" | "file.clearRecent" | "file.removeRecent" => true,
++        // the host page owns the file and the window: no copy saved inside the page, no quitting,
++        // no links out of the app, no update check of a build the host ships
++        "file.saveACopy" | "file.exit" | "file.revert" | "help.github" | "help.reportIssue" | "help.checkForUpdates" => true,
+         "file.new" | "file.newFromClipboard" => has_document,
+         id => id.starts_with("file.openRecent."),
+     }
+ }
+ 
++/// The host's request a command makes in embedded mode, instead of running: Save, Save As and
++/// Print go to the host page, which writes the file with its own dialog (or prints) and only then
++/// marks the document saved. The page sees the window event `hanpan-host-<request>`.
++pub fn host_request(id: &str) -> Option<&'static str> {
++    Some(match id {
++        "file.save" => "save",
++        "file.saveAs" => "saveAs",
++        "file.print" | "file.printOneCopy" => "print",
++        _ => return None,
++    })
++}
++
+ /// Is command `id` gone from the menus in embedded mode (off whatever the documents)?
+ pub fn hides(id: &str) -> bool {
+     blocks(id, false)
+@@ -50,4 +67,16 @@ mod tests {
+             assert!(!blocks(id, true), "{id}");
+         }
+     }
++
++    #[test]
++    fn save_and_print_ask_the_host_and_links_out_are_gone() {
++        assert_eq!(host_request("file.save"), Some("save"));
++        assert_eq!(host_request("file.saveAs"), Some("saveAs"));
++        assert_eq!(host_request("file.print"), Some("print"));
++        assert_eq!(host_request("file.printOneCopy"), Some("print"));
++        assert_eq!(host_request("file.export.exportAs"), None);
++        for id in ["file.saveACopy", "file.exit", "file.revert", "help.github", "help.reportIssue", "help.checkForUpdates"] {
++            assert!(blocks(id, true) && hides(id), "{id}");
++        }
++    }
+ }
+diff --git a/crates/ui-egui/src/file_open.rs b/crates/ui-egui/src/file_open.rs
+index 814fc4e1146c61c7433117e8d17b236b0cf92112..5303d3173264fa5ca8f30173f1c269bd9f004879 100644
+--- a/crates/ui-egui/src/file_open.rs
++++ b/crates/ui-egui/src/file_open.rs
+@@ -55,7 +55,12 @@ pub(crate) fn with_missing_fonts(app: &PhotocraftApp, warnings: Vec<String>) ->
+ /// [`with_missing_fonts`] for `doc` itself: a file held back for its profile prompt
+ /// (`open_prompt`) isn't the active document yet.
+ pub(crate) fn with_missing_fonts_of(doc: &photocraft_doc::Document, mut warnings: Vec<String>) -> Vec<String> {
+-    for w in photocraft_engine::type_extra_cmds::missing_font_warnings(doc) {
++    // Hanpan: a family the PC has is loaded from it (embedded mode, `crate::local_fonts`): no warning
++    for font in photocraft_engine::type_extra_cmds::missing_fonts(doc) {
++        if crate::local_fonts::want(&font) {
++            continue;
++        }
++        let w = crate::i18n::fmt(tl!("font '{font}' is not installed; text may render using a fallback face"), &[("font", &font)]);
+         if !warnings.contains(&w) {
+             warnings.push(w);
+         }
+diff --git a/crates/ui-egui/src/i18n.rs b/crates/ui-egui/src/i18n.rs
+index a8fa5c2bcf6532abd5fca9df58b647b261232235..df38f93d5e20cb899094d3dc2d7c521c11cadc71 100644
+--- a/crates/ui-egui/src/i18n.rs
++++ b/crates/ui-egui/src/i18n.rs
+@@ -496,3 +496,16 @@ mod tests;
+ 
+ #[cfg(test)]
+ mod live_tests;
++
++/// 엔진이 영어로 짓는 기본 레이어 이름("Background", "Layer 0")을 화면 언어로 보여 준다.
++/// 문서에 저장되는 이름은 그대로 두고 그릴 때만 바꾼다(PSD 호환, 엔진·자동화 테스트 유지).
++pub fn default_name(name: &str) -> std::borrow::Cow<'_, str> {
++    use std::borrow::Cow;
++    if name == "Background" {
++        return Cow::Borrowed(tr(current(), "Background"));
++    }
++    match name.strip_prefix("Layer ") {
++        Some(n) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => Cow::Owned(fmt(t("Layer {n}"), &[("n", n)])),
++        _ => Cow::Borrowed(name),
++    }
++}
+diff --git a/crates/ui-egui/src/i18n/ko.tsv b/crates/ui-egui/src/i18n/ko.tsv
+index 824372d08f5d75229e67f0e850f689c39b4e39c2..817c049afbb20914b659105988d292d0805bfe0a 100644
+--- a/crates/ui-egui/src/i18n/ko.tsv
++++ b/crates/ui-egui/src/i18n/ko.tsv
+@@ -191,7 +191,7 @@
+ 	Layer Comps to Files…	레이어 구성 요소를 파일로…
+ 	Color Lookup Tables…	색상 조회 테이블…
+ 	Data Sets as Files…	데이터 세트를 파일로…
+-	Paths to Illustrator…	패스를 Illustrator로…
++	Paths to Illustrator…	패스를 .ai 파일로…
+ 	Render Video…	비디오 렌더링…
+ 	Generate	생성
+ 	Image Assets	이미지 에셋
+@@ -202,12 +202,12 @@
+ 	Batch…	일괄 처리…
+ 	Create Droplet…	드롭릿 만들기…
+ 	Crop and Straighten Photos	사진 자르기 및 수평 맞추기
+-	Contact Sheet II…	밀착 인화 II…
++	Contact Sheet II…	밀착 인화…
+ 	Conditional Mode Change…	조건부 모드 변경…
+ 	Fit Image…	이미지 맞추기…
+ 	Lens Correction…	렌즈 교정…
+ 	Merge to HDR Pro…	HDR Pro로 병합…
+-	Photomerge…	Photomerge…
++	Photomerge…	파노라마 합치기…
+ 	Scripts	스크립트
+ 	Image Processor…	이미지 프로세서…
+ 	Delete All Empty Layers	빈 레이어 모두 삭제
+@@ -243,7 +243,7 @@
+ 	Paste in Place	같은 위치에 붙여넣기
+ 	Paste Into	선택 영역 안에 붙여넣기
+ 	Paste Outside	선택 영역 밖에 붙여넣기
+-	Paste Lorem Ipsum	Lorem Ipsum 붙여넣기
++	Paste Lorem Ipsum	예시 글 붙여넣기
+ 	Clear	지우기
+ 	Search…	검색…
+ 	Check Spelling…	맞춤법 검사…
+@@ -579,7 +579,7 @@
+ 	Orientation	방향
+ 	Horizontal	가로
+ 	Vertical	세로
+-	OpenType	OpenType
++	OpenType	오픈타입
+ 	Standard Ligatures	표준 합자
+ 	Contextual Alternates	문맥 대체 글리프
+ 	Discretionary Ligatures	임의 합자
+@@ -872,14 +872,14 @@
+ 	Properties	속성
+ 	Shapes	모양
+ 	Styles	스타일
+-	Swatches	색상 견본
++	Swatches	견본
+ 	Timeline	타임라인
+ 	Tool Presets	도구 사전 설정
+ 	Tools	도구
+ 	About PhotoCraft	PhotoCraft 정보
+ 	PhotoCraft on GitHub	GitHub의 PhotoCraft
+ 	Report an Issue…	문제 신고…
+-	WIA Support…	WIA 지원…
++	WIA Support…	스캐너에서 가져오기(WIA)…
+ 	Apply	적용
+ 	HSB/HSL	HSB/HSL
+ 	Invert…	반전…
+@@ -1083,7 +1083,7 @@
+ 	Commit warp ({key})	뒤틀기 적용 ({key})
+ 	Constant	상수
+ 	Constrain proportions	비율 유지
+-	Contact Sheet II	밀착 인화 II
++	Contact Sheet II	밀착 인화
+ 	Content-Aware	내용 인식
+ 	Contiguous	인접
+ 	Contrast	대비
+@@ -1826,7 +1826,7 @@
+ 	Linear Burn	선형 번
+ 	Linear Height	선형 높이
+ 	Link with Layer	레이어와 연결
+-	Lorem Ipsum	Lorem Ipsum
++	Lorem Ipsum	예시 글
+ 	Magentas	마젠타 계열
+ 	Magic Eraser Tool	자동 지우개 도구
+ 	Magic Wand Tool	자동 선택 도구
+@@ -2674,7 +2674,7 @@ cameraRaw	Color	색상
+ 	Layer Comps to Files	레이어 구성 요소를 파일로
+ 	Color Lookup Tables	색상 조회 테이블
+ 	Data Sets as Files	데이터 세트를 파일로
+-	Paths to Illustrator	패스를 Illustrator로
++	Paths to Illustrator	패스를 .ai 파일로
+ 	Render Video	비디오 렌더링
+ 	Place Embedded	포함하여 가져오기
+ 	Place Linked	연결하여 가져오기
+@@ -2684,7 +2684,7 @@ cameraRaw	Color	색상
+ 	Fit Image	이미지 맞추기
+ 	Lens Correction	렌즈 교정
+ 	Merge to HDR Pro	HDR Pro로 병합
+-	Photomerge	Photomerge
++	Photomerge	파노라마 합치기
+ 	Image Processor	이미지 프로세서
+ 	Script Events Manager	스크립트 이벤트 관리자
+ 	Browse	찾아보기
+@@ -2807,7 +2807,7 @@ cameraRaw	Color	색상
+ 	32-bit Preview Options	32비트 미리 보기 옵션
+ 	New Guide	새 안내선
+ 	Report an Issue	문제 신고
+-	WIA Support	WIA 지원
++	WIA Support	스캐너에서 가져오기(WIA)
+ 	Load Files into Stack	파일을 스택으로 불러오기
+ 	Statistics	통계
+ 	Duplicate Layers	레이어 복제
+@@ -3504,6 +3504,7 @@ curves	Smooth	매끄럽게
+ 	Hide Styles	스타일 숨기기
+ 	Monospace	고정폭
+ 	No fonts match these filters.	이 필터와 일치하는 글꼴이 없습니다.
++	No matching fonts	일치하는 글꼴이 없습니다.
+ 	No similar fonts: the current font doesn't say what it looks like.	비슷한 글꼴 없음: 현재 글꼴에 모양 정보가 없습니다.
+ 	OpenType font	OpenType 글꼴
+ 	Sans Serif	산세리프
+@@ -3732,3 +3733,9 @@ smartSvg	AI/PDF/EPS contents will be edited as SVG. Saving replaces the embedded
+ 	Stop Color	정지점 색상
+ 	Shapes can't use patterns yet	모양에는 아직 패턴을 사용할 수 없습니다
+ 	Edit Brush…	브러시 편집…
++# 한판 웹판: 남은 영어 화면 문구와 기본 이름
++	Artboards	아트보드
++	Search menus	메뉴 검색
++	Layer {n}	레이어 {n}
++@id	file.revert	저장된 상태로 복귀
++	font '{font}' is not installed; text may render using a fallback face	'{font}' 글꼴이 이 PC에 없어 다른 글꼴로 표시합니다.
+diff --git a/crates/ui-egui/src/i18n/tests.rs b/crates/ui-egui/src/i18n/tests.rs
+index a67be38ff54b85dd9ed3aa113b97194297d06fb3..7bb60ab504498b1c057751582185b272cf0811b1 100644
+--- a/crates/ui-egui/src/i18n/tests.rs
++++ b/crates/ui-egui/src/i18n/tests.rs
+@@ -444,3 +444,17 @@ fn bundled_catalogs_are_consistent() {
+         }
+     }
+ }
++
++/// 엔진이 영어로 짓는 기본 이름은 그릴 때 화면 언어로 바뀌고, 사용자가 지은 이름과 영어 화면은 그대로다.
++#[test]
++fn default_layer_names_show_in_the_interface_language() {
++    let ko = Lang::from_code("ko").expect("ko registered");
++    with_language(ko, || {
++        assert_eq!(default_name("Background"), "배경");
++        assert_eq!(default_name("Layer 0"), "레이어 0");
++        assert_eq!(default_name("Layer 12"), "레이어 12");
++        assert_eq!(default_name("Layer copy"), "Layer copy", "not a default name");
++        assert_eq!(default_name("My photo"), "My photo");
++    });
++    with_language(Lang::EN, || assert_eq!(default_name("Layer 0"), "Layer 0"));
++}
+diff --git a/crates/ui-egui/src/i18n/vi.tsv b/crates/ui-egui/src/i18n/vi.tsv
+index 60ff2fce3465e806e35e6236ea14f26c35771702..399b8cce988b8cbea2e5bfc52c2db0d8dddad320 100644
+--- a/crates/ui-egui/src/i18n/vi.tsv
++++ b/crates/ui-egui/src/i18n/vi.tsv
+@@ -195,7 +195,7 @@
+ 	Color Lookup Tables…	Bảng tra màu…
+ 	Color Settings…	Cài đặt màu…
+ 	Conditional Mode Change…	Đổi chế độ có điều kiện…
+-	Contact Sheet II…	Contact Sheet II…
++	Contact Sheet II…	Bảng ảnh thu nhỏ…
+ 	Content-Aware Fill…	Tô theo nội dung…
+ 	Content-Aware Scale	Co giãn theo nội dung
+ 	Convert to Profile…	Chuyển sang hồ sơ màu…
+@@ -267,11 +267,11 @@
+ 	Paste Into	Dán vào trong
+ 	Paste Outside	Dán ra ngoài
+ 	Paste Special	Dán đặc biệt
+-	Paths to Illustrator…	Đường dẫn sang Illustrator…
++	Paths to Illustrator…	Đường dẫn sang tệp .ai…
+ 	Performance…	Hiệu năng…
+ 	Perspective	Phối cảnh
+ 	Perspective Warp	Biến dạng phối cảnh
+-	Photomerge…	Photomerge…
++	Photomerge…	Ghép ảnh…
+ 	Place Embedded…	Đặt nhúng…
+ 	Place Linked…	Đặt liên kết…
+ 	Plug-ins…	Plug-in…
+@@ -586,7 +586,7 @@
+ 	Panels	Bảng
+ 	Paragraph Panel	Bảng đoạn văn
+ 	Paragraph Styles Panel	Bảng kiểu đoạn văn
+-	Paste Lorem Ipsum	Dán Lorem Ipsum
++	Paste Lorem Ipsum	Dán văn bản mẫu
+ 	Rasterize Type Layer	Raster hóa lớp chữ
+ 	Replace All Missing Fonts	Thay mọi phông chữ thiếu
+ 	Reselect	Chọn lại
+@@ -796,7 +796,7 @@
+ 	Float All in Windows	Thả nổi tất cả trong cửa sổ
+ 	Float in Window	Thả nổi trong cửa sổ
+ 	Glyphs	Glyph
+-	Gradients	Chuyển sắc
++	Gradients	Dải màu
+ 	Graphic and Web	Đồ họa và Web
+ 	Histogram	Histogram
+ 	History	Lịch sử
+@@ -832,7 +832,7 @@
+ 	Studio Light Theme	Chủ đề Studio sáng
+ 	Studio Theme	Chủ đề Studio
+ 	Styles	Kiểu
+-	Swatches	Mẫu màu
++	Swatches	Mẫu
+ 	System Info…	Thông tin hệ thống…
+ 	Theme	Chủ đề
+ 	Tile	Xếp ô
+@@ -2327,7 +2327,7 @@ layers	Fill:	Độ tô:
+ 	Check Spelling	Kiểm tra chính tả
+ 	Click with the Note tool to add a note.	Nhấp bằng công cụ Ghi chú để thêm ghi chú.
+ 	Constraints ({n})	Ràng buộc ({n})
+-	Contact Sheet II	Contact Sheet II
++	Contact Sheet II	Bảng ảnh thu nhỏ
+ 	Create Droplet	Tạo Droplet
+ 	Create new action	Tạo thao tác mới
+ 	Create Video Timeline	Tạo dòng thời gian video
+@@ -3767,6 +3767,7 @@ curves	Smooth	Làm mượt
+ 	Hide Styles	Ẩn kiểu
+ 	Monospace	Đơn cách
+ 	No fonts match these filters.	Không có phông chữ nào khớp với các bộ lọc này.
++	No matching fonts	Không có phông chữ phù hợp.
+ 	No similar fonts: the current font doesn't say what it looks like.	Không có phông chữ tương tự: phông chữ hiện tại không mô tả hình dáng của nó.
+ 	OpenType font	Phông chữ OpenType
+ 	Sans Serif	Không chân
+@@ -4020,3 +4021,8 @@ smartSvg	AI/PDF/EPS contents will be edited as SVG. Saving replaces the embedded
+ 	Stop Color	Màu điểm dừng
+ 	Shapes can't use patterns yet	Hình chưa thể dùng mẫu tô
+ 	Edit Brush…	Chỉnh sửa cọ…
++# Hanpan web build
++	Artboards	Bảng vẽ
++	Layer {n}	Lớp {n}
++@id	file.revert	Hoàn nguyên về bản đã lưu
++	font '{font}' is not installed; text may render using a fallback face	Phông '{font}' không có trên máy này; chữ được hiển thị bằng phông khác.
+diff --git a/crates/ui-egui/src/local_fonts.rs b/crates/ui-egui/src/local_fonts.rs
+index d83c5bc9c7f7af920bdbc4c31394bfdf066ca030..13c67dc356cee151fcd9079d1a4e2725f250bbff 100644
+--- a/crates/ui-egui/src/local_fonts.rs
++++ b/crates/ui-egui/src/local_fonts.rs
+@@ -39,12 +39,22 @@ struct State {
+     /// Families picked, not yet taken by the shell.
+     requested: Vec<String>,
+     loads: Vec<(String, Load)>,
++    /// Families an opened document uses, waiting for the list to be loaded if the PC has them.
++    wanted: Vec<String>,
+     /// Bumped on every change, so menus build their rows again.
+     generation: u64,
+ }
+ 
+ static STATE: Mutex<State> =
+-    Mutex::new(State { enabled: false, listing: Listing::NotAsked, list_requested: false, requested: Vec::new(), loads: Vec::new(), generation: 0 });
++    Mutex::new(State {
++    enabled: false,
++    listing: Listing::NotAsked,
++    list_requested: false,
++    requested: Vec::new(),
++    loads: Vec::new(),
++    wanted: Vec::new(),
++    generation: 0,
++});
+ 
+ fn state() -> MutexGuard<'static, State> {
+     STATE.lock().unwrap_or_else(PoisonError::into_inner)
+@@ -93,6 +103,15 @@ pub fn listed(result: Result<Vec<String>, String>) {
+         Ok(mut families) => {
+             families.sort_by_key(|f| f.to_lowercase());
+             families.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
++            // the families an opened document waited for: those the PC has load now
++            for want in std::mem::take(&mut s.wanted) {
++                if let Some(f) = families.iter().find(|f| f.eq_ignore_ascii_case(&want)).cloned()
++                    && !s.loads.iter().any(|(l, _)| *l == f)
++                {
++                    s.loads.push((f.clone(), Load::Loading));
++                    s.requested.push(f);
++                }
++            }
+             Listing::Listed(families)
+         }
+         Err(e) => Listing::Failed(e),
+@@ -116,6 +135,35 @@ pub fn request(family: &str) {
+     s.generation = s.generation.wrapping_add(1);
+ }
+ 
++/// A family an opened document uses that the app does not have: loaded from the PC if the PC has
++/// it (once the list is read). True when it is (or may yet be) loaded, so the document's "font not
++/// installed" warning is not shown for it.
++pub fn want(family: &str) -> bool {
++    let mut s = state();
++    if !s.enabled {
++        return false;
++    }
++    match &s.listing {
++        Listing::Listed(all) => {
++            let Some(f) = all.iter().find(|f| f.eq_ignore_ascii_case(family)).cloned() else { return false };
++            drop(s);
++            request(&f);
++            true
++        }
++        _ => {
++            if !s.wanted.iter().any(|w| w.eq_ignore_ascii_case(family)) {
++                s.wanted.push(family.to_string());
++            }
++            if !matches!(s.listing, Listing::Pending) {
++                s.listing = Listing::Pending;
++                s.list_requested = true;
++            }
++            s.generation = s.generation.wrapping_add(1);
++            true
++        }
++    }
++}
++
+ /// For the shell: the families to load now.
+ pub fn take_requests() -> Vec<String> {
+     std::mem::take(&mut state().requested)
+@@ -145,11 +193,55 @@ pub fn load_of(family: &str) -> Option<Load> {
+ pub fn families_for(query: &str, known: &[String]) -> Vec<String> {
+     let Listing::Listed(all) = listing() else { return Vec::new() };
+     all.into_iter()
+-        .filter(|f| query.is_empty() || f.to_lowercase().contains(query))
++        .filter(|f| query.is_empty() || matches_query(f, query))
+         .filter(|f| !known.iter().any(|k| k.eq_ignore_ascii_case(f)))
+         .collect()
+ }
+ 
++/// Korean names of the Korean fonts Windows and common packages install, as the browser lists
++/// them by their English family name: "맑은" finds Malgun Gothic.
++pub const KOREAN_NAMES: &[(&str, &str)] = &[
++    ("Malgun Gothic", "맑은 고딕"),
++    ("Gulim", "굴림"),
++    ("GulimChe", "굴림체"),
++    ("Dotum", "돋움"),
++    ("DotumChe", "돋움체"),
++    ("Batang", "바탕"),
++    ("BatangChe", "바탕체"),
++    ("Gungsuh", "궁서"),
++    ("GungsuhChe", "궁서체"),
++    ("NanumGothic", "나눔고딕"),
++    ("NanumGothicCoding", "나눔고딕코딩"),
++    ("NanumMyeongjo", "나눔명조"),
++    ("NanumBarunGothic", "나눔바른고딕"),
++    ("NanumSquare", "나눔스퀘어"),
++    ("NanumPen", "나눔손글씨 펜"),
++    ("Nanum Pen Script", "나눔손글씨 펜"),
++    ("Nanum Brush Script", "나눔손글씨 붓"),
++    ("HCR Batang", "함초롬바탕"),
++    ("HCR Dotum", "함초롬돋움"),
++    ("HYGothic-Extra", "HY견고딕"),
++    ("HYHeadLine-Medium", "HY헤드라인M"),
++    ("HYMyeongJo-Extra", "HY견명조"),
++    ("Noto Sans KR", "노토 산스 KR"),
++    ("Noto Serif KR", "노토 세리프 KR"),
++    ("Spoqa Han Sans Neo", "스포카 한 산스 네오"),
++    ("Pretendard", "프리텐다드"),
++];
++
++/// The Korean name of a PC font family, if it has a known one.
++pub fn korean_name(family: &str) -> Option<&'static str> {
++    KOREAN_NAMES.iter().find(|(en, _)| en.eq_ignore_ascii_case(family)).map(|(_, ko)| *ko)
++}
++
++/// Does `family` answer the search `query` (lowercase), by its own name or its Korean one? Spaces
++/// do not count: "맑은고딕" and "malgungothic" find it too.
++pub fn matches_query(family: &str, query: &str) -> bool {
++    let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_lowercase();
++    let q = squash(query);
++    q.is_empty() || squash(family).contains(&q) || korean_name(family).is_some_and(|ko| squash(ko).contains(&q))
++}
++
+ /// The line the section shows instead of families, if any, and whether clicking it asks for the
+ /// list again.
+ pub fn note() -> Option<(String, bool)> {
+@@ -204,3 +296,18 @@ pub fn control(params: &serde_json::Value) -> Result<serde_json::Value, String>
+         }
+     }
+ }
++
++#[cfg(test)]
++mod hanpan_search_tests {
++    use super::*;
++
++    #[test]
++    fn korean_names_find_the_pc_font() {
++        assert!(matches_query("Malgun Gothic", "맑은"));
++        assert!(matches_query("Malgun Gothic", "맑은고딕"));
++        assert!(matches_query("Malgun Gothic", "malgun"));
++        assert!(matches_query("Malgun Gothic", "malgungothic"));
++        assert!(!matches_query("Gulim", "맑은"));
++        assert_eq!(korean_name("malgun gothic"), Some("맑은 고딕"));
++    }
++}
+diff --git a/crates/ui-egui/src/menus/invoke.rs b/crates/ui-egui/src/menus/invoke.rs
+index d90e51cdd7c1eb515dbef3ef4fe519648d24a017..780b4bbac45bd6fc00e616efc777832c475f9044 100644
+--- a/crates/ui-egui/src/menus/invoke.rs
++++ b/crates/ui-egui/src/menus/invoke.rs
+@@ -48,6 +48,18 @@ pub fn invoke(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, params: Va
+     if app.services.embedded && crate::embedded::blocks(id, app.session.active().is_some()) {
+         return Err(format!("{id} is unavailable here"));
+     }
++    // Hanpan: Save, Save As and Print are the host page's; nothing is written or said here
++    if app.services.embedded
++        && let Some(request) = crate::embedded::host_request(id)
++    {
++        if app.session.active().is_none() {
++            return Ok(Value::Null);
++        }
++        if let Some(ask) = app.services.host_request.as_ref() {
++            ask(request)?;
++        }
++        return Ok(json!({"host": request}));
++    }
+     if crate::discard_ui::intercept(app, id, &params) {
+         return Ok(Value::Null);
+     }
+diff --git a/crates/ui-egui/src/menus/state.rs b/crates/ui-egui/src/menus/state.rs
+index d53461e474681081411a3a5956f34609b4f51730..efb0b579edbf43c1e8c195c067e7257489f65bbe 100644
+--- a/crates/ui-egui/src/menus/state.rs
++++ b/crates/ui-egui/src/menus/state.rs
+@@ -6,6 +6,10 @@ pub fn is_enabled(app: &PhotocraftApp, id: &str) -> bool {
+     if app.services.embedded && crate::embedded::blocks(id, app.session.active().is_some()) {
+         return false;
+     }
++    // Hanpan: the host saves and prints whatever document is open
++    if app.services.embedded && crate::embedded::host_request(id).is_some() {
++        return app.session.active().is_some();
++    }
+     if id == "layer.selectUnderCursor" {
+         return app.session.active().is_some() && app.drag.is_none() && app.brush_resize.is_none();
+     }
+diff --git a/crates/ui-egui/src/panels/layer_row.rs b/crates/ui-egui/src/panels/layer_row.rs
+index cb29276091828d5b1883721c50fafd8a8de3057e..f113f103e5ab1f5d24e9cb870aa4c0c8d7a05645 100644
+--- a/crates/ui-egui/src/panels/layer_row.rs
++++ b/crates/ui-egui/src/panels/layer_row.rs
+@@ -389,7 +389,7 @@ fn paint_row_name(painter: &egui::Painter, t: &Tokens, rc: &RowCtx<'_>, x: f32,
+     let italic = !t.pro && doc.is_background(l.id);
+     // Photoshop rows show only the name; the kind sub-label is a Studio-theme addition.
+     let is_pixel = t.pro || ts == 0.0 || matches!(l.content, LayerContent::Raster(_));
+-    let name_rect = crate::layer_row_ui::truncated(painter, &l.name, font, name_color, italic, name_right - x).map(|galley| {
++    let name_rect = crate::layer_row_ui::truncated(painter, &crate::i18n::default_name(&l.name), font, name_color, italic, name_right - x).map(|galley| {
+         let text_pos = pos2(x, rect.center().y - galley.size().y / 2.0 - if is_pixel { 0.0 } else { 7.0 });
+         let r = Rect::from_min_size(text_pos, galley.size());
+         painter.galley(text_pos, galley, name_color);
+@@ -459,7 +459,7 @@ fn handle_row_double_click(app: &mut PhotocraftApp, ctx: &egui::Context, rc: &Ro
+         if crate::doc_props_ui::is_background(doc, l) {
+             actions.push(("layer.new.layerFromBackground".into(), json!({})));
+         } else if name_rect.is_some_and(|n| on(Rect::from_x_y_ranges(n.x_range(), rect.y_range()))) {
+-            if let Some(done) = crate::layer_row_ui::start_rename(ctx, l.id.0, &l.name) {
++            if let Some(done) = crate::layer_row_ui::start_rename(ctx, l.id.0, &crate::i18n::default_name(&l.name)) {
+                 // One rename at a time: starting this one commits any other (#314).
+                 actions.push(done);
+             }
+@@ -511,7 +511,7 @@ fn row_context_menu(app: &mut PhotocraftApp, ui: &mut egui::Ui, rc: &RowCtx<'_>,
+             // Right-clicking inside a multi-selection keeps it and acts on every selected layer.
+             let on_set = row.multi && selected;
+             if crate::layer_menu_ui::show(app, ui, l, on_set, actions)
+-                && let Some(done) = crate::layer_row_ui::start_rename(ui.ctx(), l.id.0, &l.name)
++                && let Some(done) = crate::layer_row_ui::start_rename(ui.ctx(), l.id.0, &crate::i18n::default_name(&l.name))
+             {
+                 actions.push(done);
+             }
+diff --git a/crates/ui-egui/src/panels/layers.rs b/crates/ui-egui/src/panels/layers.rs
+index ea5d6720589b6e43194324bc152b305e402c2e8c..c9371bfd8ae93fe42796f6ee4798263d3c4412d7 100644
+--- a/crates/ui-egui/src/panels/layers.rs
++++ b/crates/ui-egui/src/panels/layers.rs
+@@ -324,7 +324,7 @@ pub(super) fn layers(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+                 && let Some(at) = drawn.iter().position(|(id, _)| id.0 == from)
+                 && let Some(&(next, _)) = if up { at.checked_sub(1).and_then(|i| drawn.get(i)) } else { drawn.get(at + 1) }
+                 && let Some(l) = doc.layer(next).filter(|l| !crate::doc_props_ui::is_background(&doc, l))
+-                && let Some(done) = crate::layer_row_ui::start_rename(ui.ctx(), next.0, &l.name)
++                && let Some(done) = crate::layer_row_ui::start_rename(ui.ctx(), next.0, &crate::i18n::default_name(&l.name))
+             {
+                 actions.push(done);
+             }
+diff --git a/crates/ui-egui/src/panels/toolbar.rs b/crates/ui-egui/src/panels/toolbar.rs
+index c8f62a602ee30d7ecf6a0cdbd86e1f5e0e4a9463..07afe95985312ce9ed1b36604dcbf6bb0308fc91 100644
+--- a/crates/ui-egui/src/panels/toolbar.rs
++++ b/crates/ui-egui/src/panels/toolbar.rs
+@@ -92,7 +92,9 @@ pub fn toolbar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+     let (w1, bx, m) = if t.pro { (40.0, 30.0, 5i8) } else { (50.0, 36.0, 7i8) };
+     let sections = visible_sections(&app.session.prefs().toolbar.hidden);
+     // Two columns when the header chevron asks for them; a column that doesn't fit scrolls.
+-    let double = app.ui.panels.toolbar_double;
++    // Hanpan: embedded in a short window (1366×768), a single column would hide the type, pen,
++    // shape, hand and zoom tools below the fold: two columns then, as Photoshop does.
++    let double = app.ui.panels.toolbar_double || (app.services.embedded && !single_column_fits(&sections, bx, t.pro, t.round_chips, ui.available_height()));
+     let w = if double { w1 + bx + 2.0 } else { w1 };
+     crate::direction::start_panel("toolbar")
+         .resizable(false)
+@@ -467,6 +469,15 @@ const STUDIO_ROW: f32 = 15.0;
+ const STUDIO_TOP: f32 = 6.0;
+ 
+ /// Height of the colour chips block.
++/// Does one column of `sections` (with the header and the colour chips) fit in `height`?
++pub(super) fn single_column_fits(sections: &[Vec<(usize, Vec<Tool>)>], bx: f32, pro: bool, studio: bool, height: f32) -> bool {
++    let rows: usize = sections.iter().map(Vec::len).sum();
++    let dividers = if pro { 0 } else { sections.len().saturating_sub(1) };
++    let tools = rows as f32 * (bx + 3.0) + dividers as f32 * 9.0;
++    let chrome = 16.0 + 14.0 + 4.0 + (if pro { 8.0 } else { 14.0 }) + chips_height(pro, studio, false) + 8.0 + bx * 2.0 + 3.0 + 6.0;
++    tools + chrome <= height
++}
++
+ pub(super) fn chips_height(pro: bool, studio: bool, wide: bool) -> f32 {
+     if studio && wide {
+         return STUDIO_CHIP.0 + STUDIO_ROW;
+@@ -624,3 +635,15 @@ fn chip_command(app: &mut PhotocraftApp, id: &str) {
+         crate::type_tool::foreground_changed(app);
+     }
+ }
++
++#[cfg(test)]
++mod hanpan_fit_tests {
++    use super::*;
++
++    #[test]
++    fn a_short_window_does_not_fit_one_column_and_a_tall_one_does() {
++        let sections = visible_sections(&[]);
++        assert!(!single_column_fits(&sections, 36.0, false, false, 640.0), "1366×768 leaves about 640 px");
++        assert!(single_column_fits(&sections, 36.0, false, false, 1400.0));
++    }
++}
+diff --git a/crates/ui-egui/src/services.rs b/crates/ui-egui/src/services.rs
+index 40a5cc4f141113d7b9c157c6ab249ca2e8a6fe48..a1adf51184b714003fa10c036d8668c347bd30e1 100644
+--- a/crates/ui-egui/src/services.rs
++++ b/crates/ui-egui/src/services.rs
+@@ -404,6 +404,8 @@ pub type RightButtonDownFn = Box<dyn Fn() -> bool + Send + Sync>;
+ pub struct Services {
+     /// Hanpan: embedded in a host page that owns the files (`crate::embedded`).
+     pub embedded: bool,
++    /// Hanpan: asks the host page for a save, save-as or print (`crate::embedded::host_request`).
++    pub host_request: Option<OpenUrlFn>,
+     /// Explicit interactive SVG smart-object editing; unavailable in browser and automation.
+     pub open_external_svg: Option<OpenExternalSvgFn>,
+     /// User-initiated desktop/browser pixel sampling.
+diff --git a/crates/ui-egui/src/tools/type_tool/fonts.rs b/crates/ui-egui/src/tools/type_tool/fonts.rs
+index 89edc2425433ab92153ac072e7915b928a0213df..2ea62656537031fca3b653b8409f7e2b800fe3e9 100644
+--- a/crates/ui-egui/src/tools/type_tool/fonts.rs
++++ b/crates/ui-egui/src/tools/type_tool/fonts.rs
+@@ -592,7 +592,11 @@ pub(crate) fn family_picker_in(
+         let mut divider: Option<f32> = None;
+         let body = ui.horizontal_top(|ui| {
+             if !filters.hide_classes {
+-                crate::font_filters::class_list(ui, &mut filters);
++                // Hanpan: after a class is picked the keys go back to the search field, not to the
++                // type layer being edited (the class button took the focus)
++                if crate::font_filters::class_list(ui, &mut filters) {
++                    ui.memory_mut(|m| m.request_focus(field));
++                }
+                 divider = Some(ui.cursor().min.x + 3.0);
+                 ui.add_space(6.0 + ui.spacing().item_spacing.x);
+             }
+@@ -616,7 +620,11 @@ pub(crate) fn family_picker_in(
+                     if filters.similar && !comparable {
+                         weak(ui, tl!("No similar fonts: the current font doesn't say what it looks like."));
+                     }
+-                    if rows.is_empty() {
++                    // Hanpan: a search the PC's fonts answer below is no "no match"
++                    let local_hits = crate::local_fonts::enabled()
++                        && !filters.any()
++                        && !crate::local_fonts::families_for(&edit.query, families).is_empty();
++                    if rows.is_empty() && !local_hits {
+                         weak(
+                             ui,
+                             if filters.favorites && library.favorites.is_empty() {
+@@ -768,10 +776,14 @@ pub(crate) fn family_picker_in(
+                             None => {}
+                         }
+                         for f in &local {
+-                            let text = match crate::local_fonts::suffix(f) {
+-                                Some(s) => format!("{f}  ({s})"),
++                            let name = match crate::local_fonts::korean_name(f) {
++                                Some(ko) => format!("{ko} ({f})"),
+                                 None => f.clone(),
+                             };
++                            let text = match crate::local_fonts::suffix(f) {
++                                Some(s) => format!("{name}  ({s})"),
++                                None => name,
++                            };
+                             let row = ui.add_sized([FONT_LIST_WIDTH, 24.0], egui::Button::selectable(*current == *f, text).truncate().stroke(egui::Stroke::NONE));
+                             if row.clicked() {
+                                 changed = true;
+diff --git a/crates/ui-egui/src/tools/type_tool/pointer.rs b/crates/ui-egui/src/tools/type_tool/pointer.rs
+index 19bab778a439ec97e4a2e2c1f50af8be4ab65ce9..3cc99534da4cec706a426c05d481dc146072248b 100644
+--- a/crates/ui-egui/src/tools/type_tool/pointer.rs
++++ b/crates/ui-egui/src/tools/type_tool/pointer.rs
+@@ -312,7 +312,9 @@ pub fn pointer_up(app: &mut PhotocraftApp, start: [f64; 2], end: [f64; 2]) {
+     let target = if !mask && !makes_box(app, start, end) { path_target(app, start[0], start[1]) } else { None };
+     // Preferences ▸ Type: "Fill new type layers with placeholder text" (on by default). The Type
+     // Mask tools start empty, as Photoshop's do.
+-    let text = if !mask && app.session.prefs().type_.fill_new_type_layers_with_placeholder { PLACEHOLDER } else { "" };
++    // 한판 임베디드는 빈 커서로 시작한다(선택된 "Lorem Ipsum"이 사무직 사용자를 헷갈리게 한다). 아무것도
++    // 쓰지 않고 끝내면 `commit`이 빈 레이어를 지운다.
++    let text = if !mask && !app.services.embedded && app.session.prefs().type_.fill_new_type_layers_with_placeholder { PLACEHOLDER } else { "" };
+     let mut p = default_style_params(app);
+     p["text"] = json!(text);
+     p["orientation"] = json!(if app.ui.tool.is_vertical_type() { "vertical" } else { "horizontal" });
+diff --git a/crates/ui-egui/src/tools/type_tool/tests.rs b/crates/ui-egui/src/tools/type_tool/tests.rs
+index dbcb62d6a55d5d463cc1f2d5fbdd8e5772be9ac6..29477bb2f2c563f2c27cb91d807c2eb48b3f60f4 100644
+--- a/crates/ui-egui/src/tools/type_tool/tests.rs
++++ b/crates/ui-egui/src/tools/type_tool/tests.rs
+@@ -585,3 +585,19 @@ fn closed_path_aligned_selection_highlights_every_visible_cluster() {
+         assert_eq!(highlights, visible, "{align}: every visible selected cluster needs its highlight");
+     }
+ }
++
++/// 한판 임베디드: 문자 도구 클릭은 "Lorem Ipsum" 없이 빈 커서로 시작하고, 아무것도 쓰지 않고
++/// 끝내면(Esc·커밋) 빈 문자 레이어를 남기지 않는다.
++#[test]
++fn embedded_click_starts_empty_and_an_empty_layer_goes_on_commit() {
++    let mut app = app();
++    app.services.embedded = true;
++    let layers = app.session.active().unwrap().doc.layers.len();
++    assert!(!pointer_down(&mut app, 50.0, 100.0, egui::Modifiers::NONE));
++    pointer_up(&mut app, [50.0, 100.0], [50.0, 100.0]);
++    assert_eq!(layer_text(&app), "", "no placeholder in the embedded build");
++    let ed = app.ui.text_edit.clone().unwrap();
++    assert_eq!((ed.anchor, ed.caret), (0, 0));
++    commit(&mut app);
++    assert_eq!(app.session.active().unwrap().doc.layers.len(), layers, "the empty type layer is removed");
++}

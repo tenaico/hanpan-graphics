@@ -216,6 +216,59 @@
     return ok(`${hit.path} ${hit.size} bytes; dirty ${before.dirty}→${after.dirty}`)
   }
 
+  // Hanpan embedded mode (UX review v2, W1): Save, Save As and Print from the app's menus and keys
+  // ask the host page (window events `hanpan-host-<request>`) and write nothing themselves: no
+  // captured download, and the document stays modified until the host has written the file.
+  checks['host-save'] = async ({ global }) => {
+    const api = await waitFor(() => window[global], 60000)
+    if (!api) return fail(`no window.${global}`)
+    api.captureDownloads(true)
+    const docState = async () => {
+      const i = await api.inspect()
+      if (global === 'photocraft') return i.session?.documents?.[i.session?.active]
+      return i.documents?.[i.activeDocument]
+    }
+    if (!(await docState())) await newDocument(api, global)
+    if (global === 'photocraft') await api.execute('edit.fillForeground', {})
+    else await api.execute('shape.rectangle', { x: 20, y: 20, width: 120, height: 80 })
+    const heard = []
+    for (const r of ['save', 'saveAs', 'print']) window.addEventListener(`hanpan-host-${r}`, () => heard.push(r))
+    const files = (await api.files()).length
+    if (global === 'photocraft') {
+      // a menu click: ui.menu.invoke runs the command as the menu does
+      for (const command of ['file.save', 'file.saveAs', 'file.print']) await api.request('ui.menu.invoke', { command })
+    } else {
+      // the keys: Ctrl+S, Ctrl+Shift+S, Ctrl+P (the shortcuts run the menu commands)
+      for (const [key, shift] of [['S', false], ['S', true], ['P', false]]) {
+        await api.request('ui.key', { key, ctrl: true, cmd: true, shift })
+        await sleep(400)
+      }
+    }
+    await sleep(1500)
+    const after = await docState()
+    const wrote = (await api.files()).length - files
+    if (heard.join() !== 'save,saveAs,print') return fail(`host asked for ${JSON.stringify(heard)}`)
+    if (wrote !== 0) return fail(`the app wrote ${wrote} file(s) itself`)
+    if (!after?.dirty) return fail(`the document reads saved: ${JSON.stringify(after)}`)
+    return ok(`host asked for ${heard.join(', ')}; nothing written; still modified`)
+  }
+
+  // PhotoCraft (Hanpan, h4): app.exportImage {format: "psd"} is the layered document for the
+  // host's recovery copy, the document left as it was
+  checks['export-psd'] = async ({ global }) => {
+    const api = await waitFor(() => window[global], 60000)
+    if (!api) return fail(`no window.${global}`)
+    if (!(await api.inspect()).session?.documents?.length) await newDocument(api, global)
+    await api.execute('edit.fillForeground', {})
+    const state = async () => JSON.stringify((await api.inspect()).session?.documents?.[0])
+    const before = await state()
+    const r = await api.request('app.exportImage', { format: 'psd' })
+    const head = atob(String(r?.dataBase64 ?? '').slice(0, 8)).slice(0, 4)
+    if (head !== '8BPS') return fail(`not a PSD: ${JSON.stringify(r).slice(0, 120)}`)
+    if ((await state()) !== before) return fail(`state changed: ${before} → ${await state()}`)
+    return ok(`PSD ${Math.round((r.dataBase64.length * 3) / 4)} bytes; document unchanged`)
+  }
+
   // PhotoCraft: app.exportImage hands back the composite image without touching the document,
   // the status line, the notices or the captured downloads
   checks['export-image'] = async ({ global }) => {

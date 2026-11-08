@@ -1,0 +1,75 @@
+diff --git a/crates/ui-egui/src/font_menu.rs b/crates/ui-egui/src/font_menu.rs
+index 877bdd11f456ce92e0a0d4685a4aa0f314b4bade..34f6e0fd7e14693e8a32ffe4b3fbf40e664c4110 100644
+--- a/crates/ui-egui/src/font_menu.rs
++++ b/crates/ui-egui/src/font_menu.rs
+@@ -91,6 +91,13 @@ const SAMPLES_PER_FRAME: usize = 4;
+ const MAX_PENDING: usize = 8;
+ /// What a sample shows when the font lacks the selected text's characters (or there is none).
+ const FALLBACK_SAMPLE: &str = "Sample";
++
++/// Hanpan W5: [`FALLBACK_SAMPLE`] in the interface language ("가나다라" in Korean) when the font
++/// `covers` it, else Latin letters: a sample shows letters, not the English word.
++fn fallback_sample(covers: &dyn Fn(&str) -> bool) -> &'static str {
++    let local = crate::i18n::tr_ctx(crate::i18n::current(), "font-sample", FALLBACK_SAMPLE);
++    if covers(local) { local } else { "AaBbCc" }
++}
+ /// The script filter's choices: all, Japanese, Latin, Thai, Korean (Hanpan).
+ const SCRIPTS: usize = 5;
+ 
+@@ -812,7 +819,7 @@ fn render_sample(family: &str, style: &str, text: &str, px: u32) -> Option<egui:
+     let db = vectorcraft_text::FontDb::global();
+     let face: Arc<vectorcraft_text::FontFace> = db.face(family, style)?;
+     let covers = |s: &str| !s.trim().is_empty() && s.chars().filter(|c| !c.is_whitespace()).all(|c| face.covers(c));
+-    let text = if covers(text) { text } else { FALLBACK_SAMPLE };
++    let text = if covers(text) { text } else { fallback_sample(&covers) };
+     if !covers(text) && !face.family.eq_ignore_ascii_case(family) {
+         return None;
+     }
+diff --git a/crates/ui-egui/src/font_menu/tests.rs b/crates/ui-egui/src/font_menu/tests.rs
+index 4fdfc5733c69bd5a42b68fc8636a077de839b9a8..6ffa9291420d8c002d1f0639c4bdc8b3100e531a 100644
+--- a/crates/ui-egui/src/font_menu/tests.rs
++++ b/crates/ui-egui/src/font_menu/tests.rs
+@@ -316,3 +316,19 @@ fn the_variable_filter_lists_only_variable_families() {
+     assert_eq!(again, frame(&mut st, vec![], &[]).0);
+     assert!(has(&again, TWO_AXIS_FAMILY) && has(&again, "Source Sans 3") && has(&again, "JetBrains Mono"), "{again:?}");
+ }
++
++/// Hanpan W5: a font that lacks the selected text's characters shows a sample in the interface
++/// language when it has those letters, else Latin letters: never the English word "Sample".
++#[test]
++fn hanpan_the_fallback_sample_is_in_the_interface_language() {
++    use crate::i18n::{Lang, current, set_current};
++    let before = current();
++    set_current(Lang::from_code("ko").expect("ko registered"));
++    assert_eq!(super::fallback_sample(&|_: &str| true), "가나다라");
++    assert_eq!(super::fallback_sample(&|s: &str| s.is_ascii()), "AaBbCc", "a font with no Hangul");
++    set_current(Lang::from_code("vi").expect("vi registered"));
++    assert_eq!(super::fallback_sample(&|_: &str| true), "Mẫu chữ");
++    set_current(Lang::EN);
++    assert_eq!(super::fallback_sample(&|_: &str| true), "Sample");
++    set_current(before);
++}
+diff --git a/crates/ui-egui/src/i18n/ko.tsv b/crates/ui-egui/src/i18n/ko.tsv
+index ac2f5e7223391f9ab6b53c98ae5130f993aead45..70a73ad6caa1749987730e84429ff2bee82ee707 100644
+--- a/crates/ui-egui/src/i18n/ko.tsv
++++ b/crates/ui-egui/src/i18n/ko.tsv
+@@ -5837,6 +5837,7 @@ breakText	Glyphs	글리프
+ 	Tracing	따라 그리기
+ 	Typography	타이포그래피
+ 	Check for Updates…	업데이트 확인…
++font-sample	Sample	가나다라
+ 	{label}: not available right now.	{label}: 지금은 할 수 없습니다.
+ 	{label}: not available right now. {reason}	{label}: 지금은 할 수 없습니다. {reason}
+ 	Couldn't do that.	이 작업을 하지 못했습니다.
+diff --git a/crates/ui-egui/src/i18n/vi.tsv b/crates/ui-egui/src/i18n/vi.tsv
+index 0d7c9a7e7dbd8c1efb9dfaf98a3033a18de27dff..28beeec62cfe62ff6ab5f95b7f5fc9b7a55905e2 100644
+--- a/crates/ui-egui/src/i18n/vi.tsv
++++ b/crates/ui-egui/src/i18n/vi.tsv
+@@ -5855,6 +5855,7 @@ breakText	Glyphs	Glyph
+ 	Tracing	Đồ họa theo ảnh
+ 	Typography	Kiểu chữ
+ 	Check for Updates…	Kiểm tra cập nhật…
++font-sample	Sample	Mẫu chữ
+ 	{label}: not available right now.	{label}: hiện chưa dùng được.
+ 	{label}: not available right now. {reason}	{label}: hiện chưa dùng được. {reason}
+ 	Couldn't do that.	Không thực hiện được thao tác này.

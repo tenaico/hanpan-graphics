@@ -229,10 +229,29 @@ index 10f0b003f88a1949443ce49abbdc9c7db47cc43f..ffc9b4b2cf9787ca0a7df3f6ca460647
  
  /// Home button at the very start of Photoshop 2026's options bar: toggles the Home (start)
 diff --git a/crates/ui-egui/src/panels/status_bar.rs b/crates/ui-egui/src/panels/status_bar.rs
-index 348feae6e634b0289f548b37c3b94932188f4412..ed044502f5e44766a4b6624a7d47887033dbbdbe 100644
+index 348feae6e634b0289f548b37c3b94932188f4412..725ff6c1d7885cd94384c29d0da6609db6fc284c 100644
 --- a/crates/ui-egui/src/panels/status_bar.rs
 +++ b/crates/ui-egui/src/panels/status_bar.rs
-@@ -55,7 +55,7 @@ pub fn status_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+@@ -2,13 +2,15 @@ use super::{PhotocraftApp, RichText, Tokens, label, vec2, widgets};
+ 
+ // ----------------------------------------------------------------------------- status bar
+ 
+-/// The status bar's height and the height of the controls in it (zoom field, Fit), which leaves
+-/// them an even margin above and below inside the bar (#2823).
+-/// Hanpan: the status line's text as shown ([`crate::embedded::shown_status`]).
++/// Hanpan: the status line's text as shown ([`crate::embedded::shown_status`]); the status line
++/// itself draws [`crate::embedded::shown_status_line`].
++#[cfg(test)]
+ pub(crate) fn shown_status(status: &str) -> String {
+     crate::embedded::shown_status(status).into_owned()
+ }
+ 
++/// The status bar's height and the height of the controls in it (zoom field, Fit), which leaves
++/// them an even margin above and below inside the bar (#2823).
+ pub fn status_bar_heights(t: &Tokens) -> (f32, f32) {
+     if t.pro { (24.0, 18.0) } else { (30.0, 22.0) }
+ }
+@@ -55,7 +57,7 @@ pub fn status_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                  if !app.ui.status.is_empty() {
                      widgets::vline(ui, 16.0);
                      let is_err = app.ui.status_error || app.ui.status.starts_with("Couldn");

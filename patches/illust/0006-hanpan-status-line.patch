@@ -1,0 +1,142 @@
+diff --git a/crates/ui-egui/src/chrome/status_bar.rs b/crates/ui-egui/src/chrome/status_bar.rs
+index 9a1ffbfbbba6727876e2ab4b7fc53694642a7f8d..6bb6388020420bc6d82b27e9ba16b15e62643dec 100644
+--- a/crates/ui-egui/src/chrome/status_bar.rs
++++ b/crates/ui-egui/src/chrome/status_bar.rs
+@@ -196,7 +196,8 @@ pub(super) fn status_readouts(app: &VectorcraftApp, ui: &mut Ui, t: &Tokens) {
+         let more = busy.len() - 1;
+         if more > 0 { format!("{label}… (+{more})") } else { format!("{label}…") }
+     } else {
+-        crate::i18n::msg(&app.ui.status)
++        // Hanpan W3: the engine's wording becomes a sentence in the interface language
++        crate::embedded::shown_status(&app.ui.status)
+     };
+     if !message.is_empty() {
+         let rect = egui::Rect::from_min_max(egui::pos2((area.left() + 18.0).min(right), area.top()), egui::pos2(right, area.bottom()));
+diff --git a/crates/ui-egui/src/embedded.rs b/crates/ui-egui/src/embedded.rs
+index dd1f691833b577822a5dfcf35663f962bd77ce70..492f39ea29223d86a7cf56dd68f2b0a9d1bfe907 100644
+--- a/crates/ui-egui/src/embedded.rs
++++ b/crates/ui-egui/src/embedded.rs
+@@ -5,6 +5,56 @@
+ //! window, [`host_request`]) and write nothing themselves. Export stays as it is. The page API
+ //! (`app.open`, `app.save`) is not gated: the host drives it.
+ 
++/// Hanpan W3: a command that can't run now, as the status line says it (its name, then the
++/// engine's reason when it has a translation).
++pub const UNAVAILABLE: &str = "{label}: not available right now.";
++pub const UNAVAILABLE_REASON: &str = "{label}: not available right now. {reason}";
++/// Hanpan W3: the engine's other errors about a command (its parameters, an unknown command).
++pub const FAILED: &str = "Couldn't do that.";
++
++/// The original text of a status line that is shown reworded goes to the browser console, once.
++fn log_original(status: &str) {
++    thread_local! {
++        static LAST: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
++    }
++    LAST.with(|last| {
++        if *last.borrow() != status {
++            log::warn!("status line: {status}");
++            status.clone_into(&mut last.borrow_mut());
++        }
++    });
++}
++
++/// Hanpan W3: the status line's text as shown, in the interface language
++/// ([`crate::i18n::msg`]). The engine's developer wording ("command `object.group` is not
++/// available right now: nothing selected") becomes the command's name and the reason when the
++/// reason has a translation (else it is left out); its other errors about a command become
++/// [`FAILED`]. The original goes to the console.
++pub fn shown_status(status: &str) -> String {
++    let lang = crate::i18n::current();
++    if let Some(at) = status.find("command `")
++        && let Some((id, reason)) = status[at + "command `".len()..].split_once("` is not available right now: ")
++    {
++        log_original(status);
++        let label = vectorcraft_engine::cmd::command_specs().iter().find(|c| c.id == id).map_or(id, |c| c.label);
++        let label = crate::i18n::tr_id(lang, id, label);
++        let reason_shown = crate::i18n::message(lang, reason);
++        if lang != crate::i18n::Lang::EN && reason_shown == reason {
++            return crate::i18n::fmt(tl!(UNAVAILABLE), &[("label", label)]);
++        }
++        let mut reason_shown = reason_shown;
++        if !reason_shown.ends_with(['.', '!', '?', '。']) {
++            reason_shown.push('.');
++        }
++        return crate::i18n::fmt(tl!(UNAVAILABLE_REASON), &[("label", label), ("reason", &reason_shown)]);
++    }
++    if status.starts_with("invalid parameters for `") || status.starts_with("unknown command `") {
++        log_original(status);
++        return tl!(FAILED).to_string();
++    }
++    crate::i18n::msg(status)
++}
++
+ /// Does the page query (`location.search`, with or without its `?`) ask for embedded mode?
+ pub fn requested(query: &str) -> bool {
+     query.trim_start_matches('?').split('&').any(|kv| kv == "embedded=hanpan")
+@@ -79,4 +129,44 @@ mod tests {
+             assert!(blocks(id, true) && hides(id), "{id}");
+         }
+     }
++
++    /// Hanpan W3: an engine refusal on the status line reads as a sentence in the interface
++    /// language (the command's name and the reason when it has a translation), never "command
++    /// `object.group` is not available right now: …" or the command's id.
++    #[test]
++    fn hanpan_engine_refusals_read_in_the_interface_language() {
++        use crate::i18n::{Lang, current, set_current, tr_id};
++        let before = current();
++        let ko = Lang::from_code("ko").expect("ko registered");
++        set_current(ko);
++        let group = tr_id(ko, "object.group", "Group");
++        assert_eq!(shown_status("command `object.group` is not available right now: nothing selected"), format!("{group}: 지금은 할 수 없습니다. 선택된 항목이 없습니다."));
++        // a reason with no translation is left out, not shown in English
++        assert_eq!(shown_status("command `object.group` is not available right now: some new reason"), format!("{group}: 지금은 할 수 없습니다."));
++        assert_eq!(shown_status("invalid parameters for `object.group`: ids must be numbers"), "이 작업을 하지 못했습니다.");
++        // other messages go through the catalogs as before
++        assert_eq!(shown_status("nothing selected"), "선택된 항목이 없습니다");
++        assert_eq!(shown_status("drawing.svg"), "drawing.svg");
++        let vi = Lang::from_code("vi").expect("vi registered");
++        set_current(vi);
++        let shown = shown_status("command `object.group` is not available right now: nothing selected");
++        assert!(shown.starts_with(&format!("{}: ", tr_id(vi, "object.group", "Group"))), "{shown}");
++        assert!(!shown.contains("command") && !shown.contains('`') && !shown.contains("nothing selected"), "{shown}");
++        set_current(before);
++    }
++
++    /// Hanpan W3: a refused command run from the menus or a key leaves that sentence, not the
++    /// engine's words, on the status line as it is drawn.
++    #[test]
++    fn hanpan_a_refused_command_reads_in_the_interface_language_on_the_status_line() {
++        use crate::i18n::{Lang, current, set_current};
++        let before = current();
++        set_current(Lang::from_code("ko").expect("ko registered"));
++        let mut app = crate::VectorcraftApp::new(vectorcraft_engine::Session::new(), Default::default());
++        app.session.execute("file.new", &serde_json::json!({})).unwrap();
++        assert!(app.run("object.group", serde_json::json!({})).is_err());
++        let shown = shown_status(&app.ui.status);
++        assert!(shown.contains("지금은 할 수 없습니다") && !shown.contains('`'), "{shown}");
++        set_current(before);
++    }
+ }
+diff --git a/crates/ui-egui/src/i18n/ko.tsv b/crates/ui-egui/src/i18n/ko.tsv
+index 832561674cd8b9d79e01d27f38b2dc7f1e305e33..ac2f5e7223391f9ab6b53c98ae5130f993aead45 100644
+--- a/crates/ui-egui/src/i18n/ko.tsv
++++ b/crates/ui-egui/src/i18n/ko.tsv
+@@ -5837,3 +5837,6 @@ breakText	Glyphs	글리프
+ 	Tracing	따라 그리기
+ 	Typography	타이포그래피
+ 	Check for Updates…	업데이트 확인…
++	{label}: not available right now.	{label}: 지금은 할 수 없습니다.
++	{label}: not available right now. {reason}	{label}: 지금은 할 수 없습니다. {reason}
++	Couldn't do that.	이 작업을 하지 못했습니다.
+diff --git a/crates/ui-egui/src/i18n/vi.tsv b/crates/ui-egui/src/i18n/vi.tsv
+index 32e90dbb2a08cc7e8438956c4d212a37205519f5..0d7c9a7e7dbd8c1efb9dfaf98a3033a18de27dff 100644
+--- a/crates/ui-egui/src/i18n/vi.tsv
++++ b/crates/ui-egui/src/i18n/vi.tsv
+@@ -5855,3 +5855,6 @@ breakText	Glyphs	Glyph
+ 	Tracing	Đồ họa theo ảnh
+ 	Typography	Kiểu chữ
+ 	Check for Updates…	Kiểm tra cập nhật…
++	{label}: not available right now.	{label}: hiện chưa dùng được.
++	{label}: not available right now. {reason}	{label}: hiện chưa dùng được. {reason}
++	Couldn't do that.	Không thực hiện được thao tác này.

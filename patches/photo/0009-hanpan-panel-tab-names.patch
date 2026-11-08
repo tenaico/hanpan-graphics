@@ -1,0 +1,74 @@
+diff --git a/crates/ui-egui/src/panels/panel_docking.rs b/crates/ui-egui/src/panels/panel_docking.rs
+index ebddecde2cef628a7edc7619a6c4301ab69dad47..d71d483dd04a5df8f016b9f5568954ab40e2d4c4 100644
+--- a/crates/ui-egui/src/panels/panel_docking.rs
++++ b/crates/ui-egui/src/panels/panel_docking.rs
+@@ -571,6 +571,10 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+     style.accent = t.accent;
+     style.right_to_left = crate::direction::is_rtl();
+     style.new_dock_zones = true;
++    // Hanpan W13: the empty bar left of the panel menu gives its room to the tabs, so the Color
++    // group's names fit whole in Korean and Vietnamese ("그레이디언트", "Họa tiết"); the group still
++    // drags by that bar, by its top edge and by a tab with the others.
++    style.drag_bar_width = 16.0;
+     let style = style.localized(|key| DOCK_LABELS.iter().find(|(k, _)| *k == key).map(|(_, english)| tl!(english).to_string()));
+     let mut dock = craft_ui::docking::DockArea::new(area)
+         .locked(locked)
+diff --git a/crates/ui-egui/src/panels/panel_docking/tests.rs b/crates/ui-egui/src/panels/panel_docking/tests.rs
+index fb2fb9bd79cf8e36ca0a6a6c2a07f50069cbaf4b..8635c2795ec009858ee69660ff2f8661f01a0515 100644
+--- a/crates/ui-egui/src/panels/panel_docking/tests.rs
++++ b/crates/ui-egui/src/panels/panel_docking/tests.rs
+@@ -891,3 +891,54 @@ fn the_native_dock_width_sizes_the_default_column() {
+     assert_eq!(columns[0].width, 380.0);
+     assert!(h.ctx.data_mut(|data| data.get_persisted::<egui::PanelState>(key)).is_none(), "taken once");
+ }
++
++/// Hanpan W13: the native dock's tab names are whole in Korean and Vietnamese, as Hanpan shows the
++/// dock (1366 and 1920 wide): "색상 견본" and "그레이디언트" were cut to "색상 …" and "그레…".
++#[cfg(not(target_arch = "wasm32"))]
++#[test]
++fn hanpan_tab_names_are_whole_in_korean_and_vietnamese() {
++    use photocraft_text::cjk::{self, CjkScript};
++    fn cut(shape: &egui::Shape, names: &[String], out: &mut Vec<String>) {
++        match shape {
++            egui::Shape::Text(text) if text.galley.elided && names.iter().any(|n| n == text.galley.text()) => out.push(text.galley.text().to_string()),
++            egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| cut(shape, names, out)),
++            _ => {}
++        }
++    }
++    let korean_font = cjk::font_files(CjkScript::Korean).iter().any(|font| font.path.is_file());
++    for code in ["ko", "vi"] {
++        if code == "ko" && !korean_font {
++            eprintln!("skipping ko: no installed Korean font");
++            continue;
++        }
++        let lang = crate::i18n::Lang::from_code(code).unwrap();
++        let _scope = crate::i18n::language_scope(lang);
++        for width in [1366.0, 1920.0] {
++            let mut ready = false;
++            let mut h = Harness::builder().with_size(vec2(width, 768.0)).with_step_dt(1.0 / 60.0).build_ui_state(
++                move |ui, app: &mut PhotocraftApp| {
++                    if !ready {
++                        PhotocraftApp::setup_context(ui.ctx(), crate::theme::ThemeKind::ProMedium);
++                        // Hangul from the PC's fonts, as the web build has NanumGothic
++                        crate::cjk_fonts::install(ui.ctx());
++                        // a brief tofu until the loader's font arrives, as in the app
++                        ui.ctx().set_missing_glyph_policy(egui::MissingGlyphPolicy::Tofu);
++                        ready = true;
++                        return;
++                    }
++                    crate::panels::dock_area(app, ui);
++                    egui::CentralPanel::default().show(ui, |_| {});
++                },
++                app(),
++            );
++            h.run_steps(12);
++            if code == "ko" {
++                assert!(h.ctx.fonts_mut(|f| f.has_glyphs(&egui::FontId::proportional(12.0), "견본그레이디언트")), "measured with a Korean font");
++            }
++            let names: Vec<String> = PANELS.iter().map(|p| tl!(p.1).to_string()).collect();
++            let mut elided = Vec::new();
++            h.output().shapes.iter().for_each(|shape| cut(&shape.shape, &names, &mut elided));
++            assert!(elided.is_empty(), "{code} at {width}: cut tab names {elided:?}");
++        }
++    }
++}

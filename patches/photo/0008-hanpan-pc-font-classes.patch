@@ -1,0 +1,232 @@
+diff --git a/crates/ui-egui/src/local_fonts.rs b/crates/ui-egui/src/local_fonts.rs
+index 13c67dc356cee151fcd9079d1a4e2725f250bbff..29a81f9b1a89520188db3df86cbdf0893ec3e823 100644
+--- a/crates/ui-egui/src/local_fonts.rs
++++ b/crates/ui-egui/src/local_fonts.rs
+@@ -191,13 +191,111 @@ pub fn load_of(family: &str) -> Option<Load> {
+ /// The families of the PC to list for `query` (lowercase; empty: all): those the app does not
+ /// have already (`known`, compared ignoring case).
+ pub fn families_for(query: &str, known: &[String]) -> Vec<String> {
++    families_in(query, known, None)
++}
++
++/// Hanpan W5: [`families_for`], only those of `class` (guessed from their names, [`guess_class`])
++/// when a class filter is on.
++pub fn families_in(query: &str, known: &[String], class: Option<photocraft_text::FontClass>) -> Vec<String> {
+     let Listing::Listed(all) = listing() else { return Vec::new() };
+-    all.into_iter()
++    filter_families(&all, query, known, class)
++}
++
++/// [`families_in`] over the list `all`.
++pub fn filter_families(all: &[String], query: &str, known: &[String], class: Option<photocraft_text::FontClass>) -> Vec<String> {
++    all.iter()
+         .filter(|f| query.is_empty() || matches_query(f, query))
+         .filter(|f| !known.iter().any(|k| k.eq_ignore_ascii_case(f)))
++        .filter(|f| class.is_none_or(|c| guess_class(f) == Some(c)))
++        .cloned()
+         .collect()
+ }
+ 
++/// Hanpan W5: name parts that tell a PC font's class, most telling first (a monospace or script
++/// "Sans" is not a sans serif). A part with a space is a phrase; one of 6 letters or more also
++/// matches the start of a word ("calligraph": "Calligraphy"); Hangul ones match anywhere.
++const CLASS_WORDS: &[(photocraft_text::FontClass, &[&str])] = {
++    use photocraft_text::FontClass::*;
++    &[
++        (Monospace, &["mono", "monospace", "courier", "consolas", "code", "coding", "console", "fixedsys", "terminal", "typewriter", "che", "ocr", "menlo", "inconsolata", "코딩"]),
++        (Blackletter, &["old english", "fraktur", "blackletter", "textura", "cloister"]),
++        (Handwritten, &["hand", "handwriting", "handwritten", "comic", "ink free", "print", "pen", "chalk", "marker", "crayon", "kristen", "bradley", "journal", "손글씨"]),
++        (
++            Script,
++            &[
++                "script", "brush", "calligraph", "corsiva", "kunstler", "vivaldi", "edwardian", "vladimir", "mistral", "rage", "freestyle", "gigi", "pristina", "blackadder", "harlow", "magneto",
++                "palace", "parchment", "zapfino", "붓",
++            ],
++        ),
++        (
++            Decorative,
++            &[
++                "algerian", "jokerman", "chiller", "showcard", "stencil", "snap", "ravie", "curlz", "broadway", "bauhaus", "playbill", "wide latin", "colonna", "castellar", "goudy stout", "matura",
++                "niagara", "onyx", "poster", "tempus", "viner", "juice", "hobo", "forte", "papyrus", "wingdings", "webdings",
++            ],
++        ),
++        (SlabSerif, &["slab", "rockwell", "clarendon", "memphis", "archer", "arvo", "zilla", "egyptienne"]),
++        (
++            SansSerif,
++            &[
++                "sans", "gothic", "grotesk", "grotesque", "arial", "helvetica", "verdana", "tahoma", "segoe", "calibri", "candara", "corbel", "trebuchet", "franklin", "gill", "futura", "malgun",
++                "gulim", "dotum", "barun", "square", "pretendard", "spoqa", "roboto", "lato", "inter", "bahnschrift", "impact", "meiryo", "yahei", "hei", "dengxian", "leelawadee", "nirmala",
++                "ebrima", "gadugi", "haettenschweiler", "agency", "eras", "tw cen", "aptos", "selawik", "grandview", "seaford", "tenorite", "avenir", "myriad", "frutiger", "univers", "montserrat",
++                "poppins", "raleway", "nunito", "arimo", "ubuntu", "고딕", "돋움", "굴림", "산스",
++            ],
++        ),
++        (
++            Serif,
++            &[
++                "serif", "times", "georgia", "garamond", "batang", "gungsuh", "myeongjo", "mincho", "song", "songti", "mingliu", "bodoni", "baskerville", "antiqua", "bookman", "cambria", "caslon",
++                "century", "constantia", "didot", "palatino", "perpetua", "sylfaen", "minion", "goudy", "bell mt", "californian", "centaur", "high tower", "footlight", "elephant", "modern no",
++                "calisto", "cooper", "bernard", "lora", "merriweather", "playfair", "sitka", "명조", "바탕", "궁서", "세리프",
++            ],
++        ),
++    ]
++};
++
++/// Hanpan W5: a PC font's class guessed from its family name (its files are only read once it is
++/// picked); `None` when the name doesn't tell.
++pub fn guess_class(family: &str) -> Option<photocraft_text::FontClass> {
++    // Words, split at spaces and punctuation and where case changes: "GulimChe" is gulim + che,
++    // "HYGothic" hy + gothic.
++    let chars: Vec<char> = family.chars().collect();
++    let mut words: Vec<String> = Vec::new();
++    let mut word = String::new();
++    for (i, &c) in chars.iter().enumerate() {
++        if !c.is_alphanumeric() {
++            if !word.is_empty() {
++                words.push(std::mem::take(&mut word));
++            }
++            continue;
++        }
++        let prev = i.checked_sub(1).and_then(|p| chars.get(p)).copied();
++        let next = chars.get(i + 1).copied();
++        let split = c.is_uppercase()
++            && prev.is_some_and(|p| p.is_lowercase() || p.is_ascii_digit() || (p.is_uppercase() && next.is_some_and(char::is_lowercase)));
++        if split && !word.is_empty() {
++            words.push(std::mem::take(&mut word));
++        }
++        word.extend(c.to_lowercase());
++    }
++    if !word.is_empty() {
++        words.push(word);
++    }
++    let spaced = format!(" {} ", words.join(" "));
++    let lower = family.to_lowercase();
++    let has = |key: &&str| {
++        if !key.is_ascii() {
++            lower.contains(*key)
++        } else if key.contains(' ') {
++            spaced.contains(&format!(" {key} "))
++        } else {
++            words.iter().any(|w| w == key || (key.len() >= 6 && w.starts_with(*key)))
++        }
++    };
++    CLASS_WORDS.iter().find(|(_, keys)| keys.iter().any(has)).map(|(class, _)| *class)
++}
++
+ /// Korean names of the Korean fonts Windows and common packages install, as the browser lists
+ /// them by their English family name: "맑은" finds Malgun Gothic.
+ pub const KOREAN_NAMES: &[(&str, &str)] = &[
+@@ -310,4 +408,62 @@ mod hanpan_search_tests {
+         assert!(!matches_query("Gulim", "맑은"));
+         assert_eq!(korean_name("malgun gothic"), Some("맑은 고딕"));
+     }
++
++    /// Hanpan W5: a PC font's class is guessed from its name, so a class filter lists the PC's
++    /// fonts of that class too (they are not read until picked).
++    #[test]
++    fn hanpan_pc_fonts_are_classed_by_name() {
++        use photocraft_text::FontClass::*;
++        let cases = [
++            ("Times New Roman", Some(Serif)),
++            ("Georgia", Some(Serif)),
++            ("Batang", Some(Serif)),
++            ("Gungsuh", Some(Serif)),
++            ("Noto Serif KR", Some(Serif)),
++            ("Arial", Some(SansSerif)),
++            ("Malgun Gothic", Some(SansSerif)),
++            ("Segoe UI", Some(SansSerif)),
++            ("Microsoft Sans Serif", Some(SansSerif)),
++            ("Century Gothic", Some(SansSerif)),
++            ("Open Sans", Some(SansSerif)),
++            ("Consolas", Some(Monospace)),
++            ("Courier New", Some(Monospace)),
++            ("GulimChe", Some(Monospace)),
++            ("Cascadia Code", Some(Monospace)),
++            ("Rockwell", Some(SlabSerif)),
++            ("Roboto Slab", Some(SlabSerif)),
++            ("Segoe Script", Some(Script)),
++            ("Brush Script MT", Some(Script)),
++            ("Lucida Calligraphy", Some(Script)),
++            ("Segoe Print", Some(Handwritten)),
++            ("Ink Free", Some(Handwritten)),
++            ("Comic Sans MS", Some(Handwritten)),
++            ("Nanum Pen Script", Some(Handwritten)),
++            ("NanumPen", Some(Handwritten)),
++            ("Lucida Handwriting", Some(Handwritten)),
++            ("Old English Text MT", Some(Blackletter)),
++            ("Algerian", Some(Decorative)),
++            ("Showcard Gothic", Some(Decorative)),
++            ("Stencil", Some(Decorative)),
++            ("Agency FB", Some(SansSerif)),
++            ("Amiri", None),
++        ];
++        for (family, class) in cases {
++            assert_eq!(guess_class(family), class, "{family}");
++        }
++    }
++
++    /// Hanpan W5: with a class filter on, the PC's section lists the families of that class (by
++    /// name), not "no fonts match"; with no class, all of them.
++    #[test]
++    fn hanpan_a_class_filter_lists_the_pc_fonts_of_that_class() {
++        use photocraft_text::FontClass;
++        let all: Vec<String> = ["Arial", "Batang", "Ink Free", "Segoe Print", "Times New Roman", "Inter"].map(String::from).to_vec();
++        let known = vec!["Inter".to_string()];
++        assert_eq!(filter_families(&all, "", &known, Some(FontClass::Handwritten)), ["Ink Free", "Segoe Print"]);
++        assert_eq!(filter_families(&all, "", &known, Some(FontClass::Serif)), ["Batang", "Times New Roman"]);
++        assert_eq!(filter_families(&all, "times", &known, Some(FontClass::Serif)), ["Times New Roman"]);
++        assert_eq!(filter_families(&all, "", &known, None).len(), 5, "the app's own families are not listed twice");
++        assert!(filter_families(&all, "", &known, Some(FontClass::Blackletter)).is_empty());
++    }
+ }
+diff --git a/crates/ui-egui/src/tools/type_tool/fonts.rs b/crates/ui-egui/src/tools/type_tool/fonts.rs
+index 2ea62656537031fca3b653b8409f7e2b800fe3e9..f75b6c7f5d6c68b237f009c6034967eb82cbc671 100644
+--- a/crates/ui-egui/src/tools/type_tool/fonts.rs
++++ b/crates/ui-egui/src/tools/type_tool/fonts.rs
+@@ -620,10 +620,11 @@ pub(crate) fn family_picker_in(
+                     if filters.similar && !comparable {
+                         weak(ui, tl!("No similar fonts: the current font doesn't say what it looks like."));
+                     }
+-                    // Hanpan: a search the PC's fonts answer below is no "no match"
+-                    let local_hits = crate::local_fonts::enabled()
+-                        && !filters.any()
+-                        && !crate::local_fonts::families_for(&edit.query, families).is_empty();
++                    // Hanpan: a search the PC's fonts answer below is no "no match". A class filter
++                    // lists them too, by the class their names tell (W5); the other filters need
++                    // what only their files say.
++                    let local_shown = crate::local_fonts::enabled() && !filters.favorites && !filters.variable && !filters.similar;
++                    let local_hits = local_shown && !crate::local_fonts::families_in(&edit.query, families, filters.class).is_empty();
+                     if rows.is_empty() && !local_hits {
+                         weak(
+                             ui,
+@@ -755,12 +756,12 @@ pub(crate) fn family_picker_in(
+                     // is on (`crate::local_fonts`). The first menu to open asks for the list; a
+                     // family picked here is applied at once and drawn in it once its files load,
+                     // as a served family is.
+-                    if crate::local_fonts::enabled() && !filters.any() {
++                    if local_shown {
+                         if crate::local_fonts::listing() == crate::local_fonts::Listing::NotAsked {
+                             crate::local_fonts::ask_list();
+                         }
+                         let note = crate::local_fonts::note();
+-                        let local = if note.is_none() { crate::local_fonts::families_for(&edit.query, families) } else { Vec::new() };
++                        let local = if note.is_none() { crate::local_fonts::families_in(&edit.query, families, filters.class) } else { Vec::new() };
+                         if note.is_some() || !local.is_empty() {
+                             ui.separator();
+                             weak(ui, crate::local_fonts::HEADING);
+@@ -784,7 +785,15 @@ pub(crate) fn family_picker_in(
+                                 Some(s) => format!("{name}  ({s})"),
+                                 None => name,
+                             };
+-                            let row = ui.add_sized([FONT_LIST_WIDTH, 24.0], egui::Button::selectable(*current == *f, text).truncate().stroke(egui::Stroke::NONE));
++                            // Hanpan W5: the name starts where the app's font names do, not centred
++                            let row = ui
++                                .allocate_ui_with_layout(egui::vec2(FONT_LIST_WIDTH, 24.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
++                                    ui.spacing_mut().item_spacing.x = 2.0;
++                                    ui.add_space(22.0 + 2.0 + 16.0);
++                                    let button = egui::Button::selectable(*current == *f, text).truncate().stroke(egui::Stroke::NONE).right_text("");
++                                    ui.add_sized([ui.available_width(), 24.0], button)
++                                })
++                                .inner;
+                             if row.clicked() {
+                                 changed = true;
+                                 current.clone_from(f);

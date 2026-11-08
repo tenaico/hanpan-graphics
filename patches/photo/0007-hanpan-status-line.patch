@@ -1,0 +1,243 @@
+diff --git a/crates/ui-egui/src/embedded.rs b/crates/ui-egui/src/embedded.rs
+index 04e88555fe81e0ca3c2a048065b28470f540cbdb..1d291ac8b578afd4a5cefda66e0256b9a362b630 100644
+--- a/crates/ui-egui/src/embedded.rs
++++ b/crates/ui-egui/src/embedded.rs
+@@ -5,22 +5,90 @@
+ //! window, [`host_request`]) and write nothing themselves. Export stays as it is. The page API's
+ //! engine commands are not gated: the host drives them.
+ 
+-/// Does the page query (`location.search`, with or without its `?`) ask for embedded mode?
+ /// A press with a painting tool while no layer is chosen: the hint the status line shows in the
+ /// interface language, in place of the engine's "command `…` is not available right now: no
+ /// active layer" (0.17 final check).
+ pub const NO_LAYER_HINT: &str = "Choose a layer first. Click the layer to paint on in the Layers panel.";
+ 
++/// Hanpan W3: a command that can't run now, as the status line says it (its name, then what to
++/// do when the engine's reason has a hint).
++pub const UNAVAILABLE: &str = "{label}: not available right now.";
++pub const UNAVAILABLE_HINT: &str = "{label}: not available right now. {hint}";
++/// Hanpan W3: any other error the engine or the app words in English, in a language that isn't.
++pub const FAILED: &str = "Couldn't do that.";
++
++/// Hanpan W3: the engine's reasons a user can act on, and what the status line says to do.
++const HINTS: &[(&[&str], &str)] = &[
++    (&["the active layer has no pixels"], "Choose a layer with pixels. Text and shape layers have none."),
++    (&["no document open", "no document", "no active document"], "Make or open a document first."),
++    (&["no active layer", "no layer selected"], "Choose a layer in the Layers panel first."),
++    (&["no selection", "there is no selection"], "Make a selection first."),
++    (&["the active layer is not a type layer", "the document has no type layers"], "Choose a text layer first."),
++    (&["the clipboard is empty"], "The clipboard is empty. Copy something first."),
++    (&["not available on the web (no file system)"], "This isn't available in this window."),
++];
++
++/// The hint, in the interface language, for the engine's `reason`; `None` for a reason with no hint.
++pub fn reason_hint(reason: &str) -> Option<&'static str> {
++    let reason = reason.trim().trim_end_matches('.');
++    HINTS.iter().find(|(reasons, _)| reasons.iter().any(|r| r.eq_ignore_ascii_case(reason))).map(|(_, hint)| tl!(hint))
++}
++
++/// The status line's sentence for command `label` (already in the interface language) that can't
++/// run for the engine's `reason`. A reason with no hint is left out: it is English.
++pub fn unavailable(label: &str, reason: &str) -> String {
++    match reason_hint(reason) {
++        Some(hint) => crate::i18n::fmt(tl!(UNAVAILABLE_HINT), &[("label", label), ("hint", hint)]),
++        None => crate::i18n::fmt(tl!(UNAVAILABLE), &[("label", label)]),
++    }
++}
++
++/// The original text of a status line that is shown reworded goes to the browser console, once.
++fn log_original(status: &str) {
++    thread_local! {
++        static LAST: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
++    }
++    LAST.with(|last| {
++        if *last.borrow() != status {
++            log::warn!("status line: {status}");
++            status.clone_into(&mut last.borrow_mut());
++        }
++    });
++}
++
+ /// The status line's text as shown: the engine's "no active layer" refusal becomes
+ /// [`NO_LAYER_HINT`], whichever path put it there.
+ pub fn shown_status(status: &str) -> std::borrow::Cow<'_, str> {
++    shown_status_line(status, false)
++}
++
++/// Hanpan W3: the status line's text as shown, `error` when it is an error. The engine's
++/// developer wording ("command `image.autoTone` is not available right now: the active layer has
++/// no pixels") becomes the command's name and what to do, in the interface language; an error
++/// still in English in another language becomes [`FAILED`]. The original goes to the console.
++pub fn shown_status_line(status: &str, error: bool) -> std::borrow::Cow<'_, str> {
++    use std::borrow::Cow;
+     if status.ends_with("is not available right now: no active layer") || status == "no active layer" {
+-        std::borrow::Cow::Borrowed(tl!(NO_LAYER_HINT))
+-    } else {
+-        std::borrow::Cow::Borrowed(status)
++        log_original(status);
++        return Cow::Borrowed(tl!(NO_LAYER_HINT));
++    }
++    if let Some(at) = status.find("command `")
++        && let Some((id, reason)) = status[at + "command `".len()..].split_once("` is not available right now: ")
++    {
++        log_original(status);
++        let label = crate::shortcut_dispatch::label(id);
++        return Cow::Owned(unavailable(crate::i18n::tr_id(crate::i18n::current(), id, &label), reason));
+     }
++    let engine = status.starts_with("invalid parameters for `") || status.starts_with("unknown command `");
++    let english = error && crate::i18n::current() != crate::i18n::Lang::EN && status.is_ascii() && !status.trim().is_empty();
++    if engine || english {
++        log_original(status);
++        return Cow::Borrowed(tl!(FAILED));
++    }
++    Cow::Borrowed(status)
+ }
+ 
++/// Does the page query (`location.search`, with or without its `?`) ask for embedded mode?
+ pub fn requested(query: &str) -> bool {
+     query.trim_start_matches('?').split('&').any(|kv| kv == "embedded=hanpan")
+ }
+@@ -94,4 +162,55 @@ mod tests {
+             assert!(blocks(id, true) && hides(id), "{id}");
+         }
+     }
++
++    /// Hanpan W3: an engine refusal on the status line reads as a sentence in the interface
++    /// language (the command's name and what to do), never "command `…` is not available right
++    /// now: …".
++    #[test]
++    fn hanpan_engine_refusals_read_in_the_interface_language() {
++        let ko = crate::i18n::Lang::from_code("ko").expect("ko registered");
++        let vi = crate::i18n::Lang::from_code("vi").expect("vi registered");
++        let engine = "command `image.autoTone` is not available right now: the active layer has no pixels";
++        crate::i18n::with_language(ko, || {
++            assert_eq!(shown_status_line(engine, true), "자동 톤: 지금은 할 수 없습니다. 그림(픽셀)이 있는 레이어를 고르세요. 문자·모양 레이어에는 쓸 수 없습니다.");
++            // a reason with no translation is left out, not shown in English
++            assert_eq!(shown_status_line("command `image.autoTone` is not available right now: some new reason", true), "자동 톤: 지금은 할 수 없습니다.");
++            // the engine's other errors, and any error left in English, become one plain sentence
++            assert_eq!(shown_status_line("invalid parameters for `image.autoTone`: amount must be a number", true), "이 작업을 하지 못했습니다.");
++            assert_eq!(shown_status_line("Couldn't read photo.psd: unexpected end of file", true), "이 작업을 하지 못했습니다.");
++            // the user's own words and file names are left alone
++            assert_eq!(shown_status_line("photo.psd 저장됨", false), "photo.psd 저장됨");
++            assert_eq!(shown_status_line("photo.psd", false), "photo.psd");
++            // h5's hint for painting with no layer stays
++            assert_eq!(shown_status_line("command `paint.stroke` is not available right now: no active layer", true), tl!(NO_LAYER_HINT));
++        });
++        crate::i18n::with_language(vi, || {
++            let shown = shown_status_line(engine, true);
++            assert!(shown.starts_with("Tự chỉnh tông: "), "{shown}");
++            assert!(!shown.contains("command") && !shown.contains("not available") && !shown.contains('`'), "{shown}");
++        });
++        // English keeps a sentence too, without the command id
++        let en = shown_status_line(engine, true);
++        assert!(en.starts_with("Auto Tone: ") && !en.contains('`'), "{en}");
++        assert_eq!(shown_status_line("Couldn't read photo.psd: unexpected end of file", true), "Couldn't read photo.psd: unexpected end of file");
++    }
++
++    /// Hanpan W3: a shortcut whose command is off says so in the interface language, with no
++    /// English reason ("인쇄 is not available: not available on the web (no file system)").
++    #[test]
++    fn hanpan_a_disabled_shortcut_says_why_in_the_interface_language() {
++        use serde_json::json;
++        let ko = crate::i18n::Lang::from_code("ko").expect("ko registered");
++        let mut app = crate::PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
++        app.session.execute("file.new", json!({"width": 32, "height": 32})).unwrap();
++        // a group has no pixels of its own
++        app.session.execute("layer.new.group", json!({})).unwrap();
++        crate::i18n::with_language(ko, || {
++            crate::shortcut_dispatch::dispatch(&mut app, &egui::Context::default(), "image.autoTone");
++            assert!(app.ui.status_error);
++            assert_eq!(app.ui.status, "자동 톤: 지금은 할 수 없습니다. 그림(픽셀)이 있는 레이어를 고르세요. 문자·모양 레이어에는 쓸 수 없습니다.");
++            crate::shortcut_dispatch::dispatch(&mut app, &egui::Context::default(), "file.revert");
++            assert!(!app.ui.status.contains("is not available") && !app.ui.status.contains("not available on the web"), "{}", app.ui.status);
++        });
++    }
+ }
+diff --git a/crates/ui-egui/src/i18n/ko.tsv b/crates/ui-egui/src/i18n/ko.tsv
+index 5a20708a770cdb0ae59e9527a74ca83727a86316..a4f8774fa81783becc6ff7d737bf9188ecb388f7 100644
+--- a/crates/ui-egui/src/i18n/ko.tsv
++++ b/crates/ui-egui/src/i18n/ko.tsv
+@@ -3740,3 +3740,13 @@ smartSvg	AI/PDF/EPS contents will be edited as SVG. Saving replaces the embedded
+ @id	file.revert	저장된 상태로 복귀
+ 	font '{font}' is not installed; text may render using a fallback face	'{font}' 글꼴이 이 PC에 없어 다른 글꼴로 표시합니다.
+ 	Choose a layer first. Click the layer to paint on in the Layers panel.	레이어를 먼저 고르세요. 레이어 패널에서 그릴 레이어를 누르세요.
++	{label}: not available right now.	{label}: 지금은 할 수 없습니다.
++	{label}: not available right now. {hint}	{label}: 지금은 할 수 없습니다. {hint}
++	Couldn't do that.	이 작업을 하지 못했습니다.
++	Choose a layer with pixels. Text and shape layers have none.	그림(픽셀)이 있는 레이어를 고르세요. 문자·모양 레이어에는 쓸 수 없습니다.
++	Make or open a document first.	먼저 문서를 만들거나 여세요.
++	Choose a layer in the Layers panel first.	먼저 레이어 패널에서 레이어를 고르세요.
++	Make a selection first.	먼저 선택 영역을 만드세요.
++	Choose a text layer first.	먼저 문자 레이어를 고르세요.
++	The clipboard is empty. Copy something first.	클립보드가 비어 있습니다. 먼저 복사하세요.
++	This isn't available in this window.	이 창에서는 쓸 수 없는 기능입니다.
+diff --git a/crates/ui-egui/src/i18n/vi.tsv b/crates/ui-egui/src/i18n/vi.tsv
+index bc9557ff6cc4f1ed23191598b80218203a33de4d..7d651a353ebdff74ee76b4be2fea63bcc5354f96 100644
+--- a/crates/ui-egui/src/i18n/vi.tsv
++++ b/crates/ui-egui/src/i18n/vi.tsv
+@@ -4027,3 +4027,13 @@ smartSvg	AI/PDF/EPS contents will be edited as SVG. Saving replaces the embedded
+ @id	file.revert	Hoàn nguyên về bản đã lưu
+ 	font '{font}' is not installed; text may render using a fallback face	Phông '{font}' không có trên máy này; chữ được hiển thị bằng phông khác.
+ 	Choose a layer first. Click the layer to paint on in the Layers panel.	Hãy chọn lớp trước. Bấm vào lớp cần vẽ trong bảng Lớp.
++	{label}: not available right now.	{label}: hiện chưa dùng được.
++	{label}: not available right now. {hint}	{label}: hiện chưa dùng được. {hint}
++	Couldn't do that.	Không thực hiện được thao tác này.
++	Choose a layer with pixels. Text and shape layers have none.	Hãy chọn lớp có điểm ảnh. Lớp chữ và lớp hình không có điểm ảnh.
++	Make or open a document first.	Hãy tạo hoặc mở tài liệu trước.
++	Choose a layer in the Layers panel first.	Hãy chọn một lớp trong bảng Lớp trước.
++	Make a selection first.	Hãy tạo vùng chọn trước.
++	Choose a text layer first.	Hãy chọn lớp chữ trước.
++	The clipboard is empty. Copy something first.	Bộ nhớ tạm đang trống. Hãy sao chép trước.
++	This isn't available in this window.	Không dùng được trong cửa sổ này.
+diff --git a/crates/ui-egui/src/input/shortcut_dispatch.rs b/crates/ui-egui/src/input/shortcut_dispatch.rs
+index dcff8d4d2c01a2d3fa7facec3b81b98932035f3b..2f2d6cfa3b9af3c633e945a39ca161d9faf19e14 100644
+--- a/crates/ui-egui/src/input/shortcut_dispatch.rs
++++ b/crates/ui-egui/src/input/shortcut_dispatch.rs
+@@ -353,7 +353,7 @@ pub fn disabled_reason(app: &PhotocraftApp, id: &str) -> String {
+     )
+ }
+ 
+-fn label(id: &str) -> String {
++pub(crate) fn label(id: &str) -> String {
+     crate::menu_catalog::CATALOG
+         .iter()
+         .find(|c| c.3 == id)
+@@ -377,8 +377,10 @@ fn dispatch_as(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, last: boo
+     let command_id = if action.is_some() { "actions.play" } else { id };
+     let outcome = if !crate::menus::is_enabled(app, command_id) {
+         let why = disabled_reason(app, command_id);
+-        let template = "{label} is not available: {reason}";
+-        app.ui.status = crate::i18n::fmt(tl!(template), &[("label", crate::i18n::tr_id(crate::i18n::current(), id, &label(id))), ("reason", tl!(&why))]);
++        // Hanpan W3: the command's name and what to do in the interface language, not the
++        // engine's English reason (which goes to the console)
++        log::info!("{id} is not available: {why}");
++        app.ui.status = crate::embedded::unavailable(crate::i18n::tr_id(crate::i18n::current(), id, &label(id)), &why);
+         app.ui.status_error = true;
+         Outcome::Disabled(why)
+     } else if ctx.data(|d| d.get_temp::<bool>(dry_run_id())).unwrap_or(false) {
+diff --git a/crates/ui-egui/src/panels/chrome_ui.rs b/crates/ui-egui/src/panels/chrome_ui.rs
+index 10f0b003f88a1949443ce49abbdc9c7db47cc43f..ffc9b4b2cf9787ca0a7df3f6ca46064744ce85c7 100644
+--- a/crates/ui-egui/src/panels/chrome_ui.rs
++++ b/crates/ui-egui/src/panels/chrome_ui.rs
+@@ -235,7 +235,7 @@ fn status_message(app: &PhotocraftApp, ui: &mut egui::Ui, t: &Tokens) {
+     let (r, _) = ui.allocate_exact_size(vec2(17.0, 16.0), Sense::hover());
+     ui.painter().line_segment([r.center_top(), r.center_bottom()], Stroke::new(1.0, t.separator));
+     let is_err = app.ui.status_error || app.ui.status.starts_with("Couldn");
+-    ui.label(RichText::new(crate::embedded::shown_status(&app.ui.status)).color(if is_err { t.warning } else { t.text_faint }));
++    ui.label(RichText::new(crate::embedded::shown_status_line(&app.ui.status, is_err)).color(if is_err { t.warning } else { t.text_faint }));
+ }
+ 
+ /// Home button at the very start of Photoshop 2026's options bar: toggles the Home (start)
+diff --git a/crates/ui-egui/src/panels/status_bar.rs b/crates/ui-egui/src/panels/status_bar.rs
+index 348feae6e634b0289f548b37c3b94932188f4412..ed044502f5e44766a4b6624a7d47887033dbbdbe 100644
+--- a/crates/ui-egui/src/panels/status_bar.rs
++++ b/crates/ui-egui/src/panels/status_bar.rs
+@@ -55,7 +55,7 @@ pub fn status_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+                 if !app.ui.status.is_empty() {
+                     widgets::vline(ui, 16.0);
+                     let is_err = app.ui.status_error || app.ui.status.starts_with("Couldn");
+-                    ui.label(RichText::new(shown_status(&app.ui.status)).color(if is_err { t.warning } else { t.text_faint }));
++                    ui.label(RichText::new(crate::embedded::shown_status_line(&app.ui.status, is_err)).color(if is_err { t.warning } else { t.text_faint }));
+                 }
+                 ui.with_layout(crate::direction::trailing(), |ui| {
+                     if app.session.active().is_some()

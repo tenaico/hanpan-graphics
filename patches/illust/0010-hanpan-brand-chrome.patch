@@ -173,12 +173,56 @@ index a2314e832d46db9a3c1dfa8465cde3cd45db45ad..2668f0d8752bbb04f971dd6adbef9778
      ui.add_space(12.0);
      ui.label("Based on VectorCraft by the ArtCraft team (MIT or Apache-2.0), modified for Hanpan.");
      ui.add_space(6.0);
+diff --git a/crates/ui-egui/src/dialogs/pdf_presets.rs b/crates/ui-egui/src/dialogs/pdf_presets.rs
+index 10f7e0e451c4aa546aef7d221ab42616ad9bdb99..60c5f1483e49863d96437e5f631aa6bb4bc5b835 100644
+--- a/crates/ui-egui/src/dialogs/pdf_presets.rs
++++ b/crates/ui-egui/src/dialogs/pdf_presets.rs
+@@ -93,10 +93,13 @@ fn body(app: &mut VectorcraftApp, ui: &mut egui::Ui, d: &mut Dialog) -> bool {
+         ui.add_space(18.0);
+         ui.vertical(|ui| {
+             ui.set_width(340.0);
+-            ui.label(egui::RichText::new(&preset.name).color(t.text_strong).strong());
++            // Hanpan: a built-in preset's name and description read in the UI language inside Hanpan
++            let lang = crate::i18n::current();
++            let shown = |s: &'_ str| if builtin { crate::i18n::builtin_shown(lang, s).to_string() } else { s.to_string() };
++            ui.label(egui::RichText::new(shown(&preset.name)).color(t.text_strong).strong());
+             if !preset.description.is_empty() {
+                 ui.add_space(4.0);
+-                ui.label(egui::RichText::new(&preset.description).color(t.text));
++                ui.label(egui::RichText::new(shown(&preset.description)).color(t.text));
+             }
+             ui.add_space(10.0);
+             details(ui, &t, preset, builtin);
+@@ -123,7 +126,7 @@ fn body(app: &mut VectorcraftApp, ui: &mut egui::Ui, d: &mut Dialog) -> bool {
+ /// what Save PDF can't honour or apply yet.
+ fn details(ui: &mut egui::Ui, t: &Tokens, preset: &vectorcraft_pdf::PdfPreset, builtin: bool) {
+     let dim = |ui: &mut egui::Ui, text: &str| ui.label(egui::RichText::new(tl!(text)).color(t.text_dim).size(11.5));
+-    widgets::dim_label(ui, &crate::i18n::fmt(tl!("Differences from {preset}:"), &[("preset", pdf::DEFAULT_PRESET)]));
++    widgets::dim_label(ui, &crate::i18n::fmt(tl!("Differences from {preset}:"), &[("preset", crate::i18n::builtin_shown(crate::i18n::current(), pdf::DEFAULT_PRESET))]));
+     let base = vectorcraft_pdf::builtin_preset(pdf::DEFAULT_PRESET).map(|p| p.settings).unwrap_or_default();
+     let mut changed = pdf::changes(&preset.settings, &base);
+     changed.sort_by_key(|c| section_of(c["option"].as_str().unwrap_or_default()));
+diff --git a/crates/ui-egui/src/dialogs/save_pdf.rs b/crates/ui-egui/src/dialogs/save_pdf.rs
+index 72a8d64ac9e35519aea2a29c88380d1dc6155d3a..1ad927098c40ccfc2e333db9de203a11cab4f056 100644
+--- a/crates/ui-egui/src/dialogs/save_pdf.rs
++++ b/crates/ui-egui/src/dialogs/save_pdf.rs
+@@ -601,7 +601,9 @@ pub(super) fn profile_pick(ui: &mut egui::Ui, d: &mut Dialog, path: &str, names:
+     let blank = names.first().copied().unwrap_or_default();
+     let current = get(d, path).as_str().filter(|s| !s.is_empty()).unwrap_or(blank).to_string();
+     ui.add_enabled_ui(enabled, |ui| {
+-        if let Some(i) = super::mixed_dropdown(ui, path, &current, names, 300.0, |k| k < builtins) {
++        // Hanpan: inside Hanpan the built-in profiles read in the UI language too (one names the app)
++        let builtin = |k: usize| k < builtins || names.get(k).is_some_and(|n| crate::i18n::hosted_builtin_profile(n));
++        if let Some(i) = super::mixed_dropdown(ui, path, &current, names, 300.0, builtin) {
+             set(d, path, json!(if i == 0 { "" } else { names.get(i).copied().unwrap_or_default() }));
+         }
+     });
 diff --git a/crates/ui-egui/src/hanpan_brand_tests.rs b/crates/ui-egui/src/hanpan_brand_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..1dc2b48c49e7154ed24462072914812575af4713
+index 0000000000000000000000000000000000000000..0156184e4a6a2500a236aaa0c7784d4992bc30e2
 --- /dev/null
 +++ b/crates/ui-egui/src/hanpan_brand_tests.rs
-@@ -0,0 +1,204 @@
+@@ -0,0 +1,261 @@
 +//! Hanpan: inside Hanpan (`?embedded=hanpan`) the chrome (app bar, menus, panels, dialogs, Home
 +//! screen, status line) shows no VectorCraft name or mark, except the About window; the Home
 +//! screen speaks in Hanpan's voice. The standalone app is unchanged.
@@ -383,8 +427,65 @@ index 0000000000000000000000000000000000000000..1dc2b48c49e7154ed244620729148125
 +    app.open_link("help.github");
 +    assert_eq!(*opened.lock().unwrap(), ["https://github.com/storytold/vectorcraft"]);
 +}
++
++/// Fix round 1: the app's own built-in names and texts (the PDF presets' names and descriptions,
++/// the built-in colour profiles) shown as they are elsewhere read in the UI language inside Hanpan,
++/// without the app's name; a preset the user named keeps its name.
++#[test]
++fn embedded_pdf_presets_dialog_shows_no_name_but_keeps_the_users() {
++    const MINE: &str = "My VectorCraft Look";
++    const MINE_ABOUT: &str = "Made for VectorCraft fans";
++    let ctx = context();
++    let mut app = app(true, "en");
++    app.session.prefs.pdf_presets.push(vectorcraft_pdf::PdfPreset { name: MINE.into(), description: MINE_ABOUT.into(), settings: Default::default() });
++    // On open the default (built-in) preset is selected: its name, description and the
++    // "Differences from" line.
++    crate::dialogs::pdf_presets::open(&mut app, None);
++    let (texts, _) = frames(&mut app, &ctx);
++    assert!(texts.iter().any(|t| t == "AI Illustration Default"), "{texts:?}");
++    assert!(texts.iter().any(|t| t.starts_with("Keeps the document editable: AI Illustration reopens")), "{texts:?}");
++    assert!(texts.iter().any(|t| t == "Differences from AI Illustration Default:"), "{texts:?}");
++    let shown: Vec<&String> = named(&texts).into_iter().filter(|t| *t != MINE).collect();
++    assert!(shown.is_empty(), "only the user's preset names the app: {shown:?}");
++    assert!(texts.iter().any(|t| t == MINE), "the user's preset in the list: {texts:?}");
++    // The user's preset, selected, reads as the user wrote it.
++    crate::dialogs::pdf_presets::open(&mut app, Some(MINE));
++    let (texts, _) = frames(&mut app, &ctx);
++    assert!(texts.iter().filter(|t| *t == MINE).count() >= 2, "in the list and as the title: {texts:?}");
++    assert!(texts.iter().any(|t| t == MINE_ABOUT), "{texts:?}");
++    assert!(texts.iter().any(|t| t == "Differences from AI Illustration Default:"), "{texts:?}");
++}
++
++/// The Separations panel's colour settings list the built-in CMYK profile without the app's name
++/// inside Hanpan, and as before outside it.
++#[test]
++fn embedded_separations_panel_profiles_show_no_name() {
++    let texts_of = |embedded: bool| {
++        let ctx = context();
++        let mut app = app(embedded, "en");
++        app.run("file.new", json!({"width": 100, "height": 100})).unwrap();
++        let mut texts = Vec::new();
++        for _ in 0..3 {
++            let screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 900.0)));
++            let mut out = ctx.run_ui(egui::RawInput { screen_rect, ..Default::default() }, |ui| {
++                app.logic(ui.ctx());
++                crate::panels::separations::show(&mut app, ui);
++            });
++            out.textures_delta.clear();
++            texts.clear();
++            out.shapes.iter().for_each(|c| collect(&c.shape, &mut texts));
++        }
++        texts
++    };
++    let texts = texts_of(true);
++    assert!(texts.iter().any(|t| t == "AI Illustration Generic CMYK (SWOP-like)"), "{texts:?}");
++    assert!(named(&texts).is_empty(), "{:?}", named(&texts));
++    crate::i18n::set_host_names(false);
++    let texts = texts_of(false);
++    assert!(texts.iter().any(|t| t == vectorcraft_color::cms::GENERIC_CMYK), "standalone as before: {texts:?}");
++}
 diff --git a/crates/ui-egui/src/i18n.rs b/crates/ui-egui/src/i18n.rs
-index 8e59e3d93e757af8d49b88c29a3326676560b0a1..5b7f06c676cbb3cc86542a2c1f0052eb19f76a2f 100644
+index 8e59e3d93e757af8d49b88c29a3326676560b0a1..a1086ac0b460ec8e42a27796d538398b6d6fb183 100644
 --- a/crates/ui-egui/src/i18n.rs
 +++ b/crates/ui-egui/src/i18n.rs
 @@ -30,7 +30,7 @@
@@ -500,7 +601,7 @@ index 8e59e3d93e757af8d49b88c29a3326676560b0a1..5b7f06c676cbb3cc86542a2c1f0052eb
      out
  }
  
-@@ -781,3 +808,248 @@ pub fn default_name(lang: Lang, name: &str) -> std::borrow::Cow<'_, str> {
+@@ -781,3 +808,262 @@ pub fn default_name(lang: Lang, name: &str) -> std::borrow::Cow<'_, str> {
      }
      Cow::Borrowed(name)
  }
@@ -658,6 +759,20 @@ index 8e59e3d93e757af8d49b88c29a3326676560b0a1..5b7f06c676cbb3cc86542a2c1f0052eb
 +    }
 +    out.push_str(&text[from..]);
 +    out
++}
++
++/// Hanpan: `s`, a built-in name or text of the app's own (a preset, a colour profile, a preset's
++/// description) that its place shows as it is: inside Hanpan in `lang` (its catalog row, with
++/// Hanpan's name for the app, [`tr`]); outside Hanpan exactly as before. Never for user data.
++pub fn builtin_shown(lang: Lang, s: &str) -> &str {
++    if host_names() { tr(lang, s) } else { s }
++}
++
++/// Hanpan: is `name` one of the colour profiles built into the app ("VectorCraft Generic CMYK
++/// (SWOP-like)" …), which [`builtin_shown`] shows in the UI language inside Hanpan? Always
++/// `false` outside Hanpan, so the profile lists read as before there.
++pub fn hosted_builtin_profile(name: &str) -> bool {
++    host_names() && vectorcraft_color::cms::profiles().iter().any(|p| p.builtin && p.name == name)
 +}
 +
 +/// Hanpan: is `source` (an English text or a command id) one whose text keeps the name?
@@ -847,10 +962,10 @@ index 6b3425dfe4aa7294f6af6abf913f9d558e03685e..8d9a54f94e97b263c7718b84f565303d
  	Widget Position:	Position du widget :
 diff --git a/crates/ui-egui/src/i18n/host_name_tests.rs b/crates/ui-egui/src/i18n/host_name_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..cd493453d050826cf07f91a4cdcce1e44f4b9f1e
+index 0000000000000000000000000000000000000000..56dc463acd7df9f96f3add8394d181e446c78fdc
 --- /dev/null
 +++ b/crates/ui-egui/src/i18n/host_name_tests.rs
-@@ -0,0 +1,254 @@
+@@ -0,0 +1,272 @@
 +//! Hanpan: embedded mode calls the app by Hanpan's name for it ("AI 일러스트" in Korean, "AI
 +//! Illustration" in every other language) wherever the UI's text names it, except the About
 +//! window; the names in user data (file names, paths, layer names) stay as they are.
@@ -1105,6 +1220,24 @@ index 0000000000000000000000000000000000000000..cd493453d050826cf07f91a4cdcce1e4
 +        assert!(has(lang(code), TITLE), "{code}");
 +    }
 +}
++
++/// Fix round 1: the app's own built-in names shown as they are (a preset, a colour profile, a
++/// format such as the Links panel's "VectorCraft") read without the name inside Hanpan only.
++#[test]
++fn builtin_names_read_without_the_name_inside_hanpan_only() {
++    let ko = lang("ko");
++    assert_eq!(builtin_shown(Lang::EN, "VectorCraft"), "VectorCraft");
++    assert_eq!(builtin_shown(ko, "VectorCraft Default"), "VectorCraft Default", "outside Hanpan exactly as before");
++    assert!(!hosted_builtin_profile(vectorcraft_color::cms::GENERIC_CMYK));
++    hosted(|| {
++        assert_eq!(builtin_shown(Lang::EN, "VectorCraft"), "AI Illustration");
++        assert_eq!(builtin_shown(Lang::EN, "VectorCraft Default"), "AI Illustration Default");
++        assert!(!names_the_app(builtin_shown(ko, "VectorCraft Default")));
++        assert!(!names_the_app(builtin_shown(ko, vectorcraft_color::cms::GENERIC_CMYK)));
++        assert!(hosted_builtin_profile(vectorcraft_color::cms::GENERIC_CMYK));
++        assert!(!hosted_builtin_profile("My VectorCraft Profile"), "a profile the user added is not built in");
++    });
++}
 diff --git a/crates/ui-egui/src/i18n/id.tsv b/crates/ui-egui/src/i18n/id.tsv
 index 2fd177a29cd9ade5c07b072f82ef26ac35e2d6d3..238047bd6ba46f069d892f7296fd050d69136450 100644
 --- a/crates/ui-egui/src/i18n/id.tsv
@@ -1295,3 +1428,35 @@ index 22d2464f35356a60cafe5679e9184987ea46ab9a..c4f2039711eed056cf4c2a5f318e7f8f
                  Sep,
                  c("Check for Updates…", "help.checkForUpdates"),
                  c("About VectorCraft", "help.about"),
+diff --git a/crates/ui-egui/src/panels/links.rs b/crates/ui-egui/src/panels/links.rs
+index 9e751cf1f579e8f9b85d6f2e54b037fa5ad8696b..44c7367337e2dca01a8352ec5b5b02a47544eac0 100644
+--- a/crates/ui-egui/src/panels/links.rs
++++ b/crates/ui-egui/src/panels/links.rs
+@@ -490,7 +490,9 @@ fn link_info(ui: &mut Ui, info: Option<&Value>, units: vectorcraft_doc::Unit) {
+     };
+     let row = super::doc_info::row;
+     row(ui, tl!("Name"), i["fileName"].as_str().or(i["name"].as_str()).unwrap_or_default().into());
+-    row(ui, tl!("Format"), i["format"].as_str().unwrap_or_default().into());
++    // Hanpan: the format's name is the app's own (a placed VectorCraft document's reads
++    // "VectorCraft"): in the UI language inside Hanpan
++    row(ui, tl!("Format"), crate::i18n::builtin_shown(crate::i18n::current(), i["format"].as_str().unwrap_or_default()).into());
+     row(ui, tl!("Color Space"), i["colorMode"].as_str().unwrap_or_default().into());
+     if let Some(l) = i["location"].as_str() {
+         row(ui, tl!("Location"), l.into());
+diff --git a/crates/ui-egui/src/panels/separations.rs b/crates/ui-egui/src/panels/separations.rs
+index 38cfa604e231ecab9230940182f091c34dd2f15f..0721fa46889cf4b673d0fa8f9a7da445b9ffb82b 100644
+--- a/crates/ui-egui/src/panels/separations.rs
++++ b/crates/ui-egui/src/panels/separations.rs
+@@ -79,8 +79,10 @@ fn plates_section(app: &mut VectorcraftApp, ui: &mut Ui) {
+ fn profile_dropdown(ui: &mut Ui, id: &str, current: &str, kind: ProfileKind, extra: Option<&str>) -> Option<String> {
+     let names: Vec<String> =
+         extra.map(str::to_string).into_iter().chain(cms::profiles().into_iter().filter(|p| p.kind == kind).map(|p| p.name)).collect();
+-    let refs: Vec<&str> = names.iter().map(|n| super::label_or_name(n, extra == Some(n.as_str()))).collect();
+-    widgets::dropdown_names(ui, id, super::label_or_name(current, extra == Some(current)), &refs, 210.0).and_then(|i| names.get(i).cloned())
++    // Hanpan: inside Hanpan the built-in profiles read in the UI language too (one names the app)
++    let built_in = |n: &str| extra == Some(n) || crate::i18n::hosted_builtin_profile(n);
++    let refs: Vec<&str> = names.iter().map(|n| super::label_or_name(n, built_in(n))).collect();
++    widgets::dropdown_names(ui, id, super::label_or_name(current, built_in(current)), &refs, 210.0).and_then(|i| names.get(i).cloned())
+ }
+ 
+ fn settings_section(app: &mut VectorcraftApp, ui: &mut Ui) {

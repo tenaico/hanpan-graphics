@@ -370,6 +370,107 @@
     return ok(`${listed.families.length} PC families; ${font} (${loaded.names.length} names) loaded in ${ms}ms; Korean text set; ${exported}`)
   }
 
+  // Hanpan theme (?embedded=hanpan): `hanpan.theme {mode}` switches the chrome to the host's dark
+  // and back to light, `hanpan.status` reads each mode back, and the menu bar is the host's
+  // colour (spec 5.1: #252525 dark, #ffffff light) in the app's own screenshot.
+  const MENU_BAR = { dark: [0x25, 0x25, 0x25], light: [0xff, 0xff, 0xff] }
+  const hex = (c) => '#' + c.map((v) => v.toString(16).padStart(2, '0')).join('')
+  // the commonest colour of the window's top 24 rows (the menu bar)
+  const menuBarColour = async (api, global) => {
+    const r = global === 'photocraft' ? await api.screenshot({ focus: false }) : await api.screenshot({ data: true, focus: false })
+    const b64 = r?.base64 ?? r?.pngBase64 ?? r?.dataBase64
+    if (typeof b64 !== 'string') throw new Error(`no PNG in the screenshot reply: ${JSON.stringify(r).slice(0, 160)}`)
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))
+    const bitmap = await createImageBitmap(new Blob([bytes], { type: 'image/png' }))
+    const canvas = new OffscreenCanvas(bitmap.width, Math.min(24, bitmap.height))
+    const g = canvas.getContext('2d')
+    g.drawImage(bitmap, 0, 0)
+    const px = g.getImageData(0, 0, canvas.width, canvas.height).data
+    const counts = new Map()
+    for (let i = 0; i < px.length; i += 4) {
+      const k = (px[i] << 16) | (px[i + 1] << 8) | px[i + 2]
+      counts.set(k, (counts.get(k) ?? 0) + 1)
+    }
+    const [k] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]
+    return [(k >> 16) & 255, (k >> 8) & 255, k & 255]
+  }
+  const near = (a, b) => a.every((v, i) => Math.abs(v - b[i]) <= 3)
+  checks.theme = async ({ global }) => {
+    const api = await waitFor(() => window[global], 60000)
+    if (!api) return fail(`no window.${global}`)
+    if (!/(^|[?&])embedded=hanpan(&|$)/.test(location.search)) return fail(`no embedded=hanpan in ${location.search}`)
+    const seen = []
+    for (const mode of ['dark', 'light']) {
+      const set = await api.request('hanpan.theme', { mode })
+      const status = await api.request('hanpan.status', {})
+      await sleep(300)
+      let bar
+      try {
+        bar = await menuBarColour(api, global)
+      } catch (e) {
+        return fail(`${mode}: screenshot: ${e && e.message}`)
+      }
+      seen.push({ mode, set: set?.mode, status: status?.mode, bar: hex(bar) })
+      if (status?.mode !== mode) return fail(`after hanpan.theme ${mode}: ${JSON.stringify(seen)}`)
+      if (!near(bar, MENU_BAR[mode])) return fail(`${mode}: menu bar ${hex(bar)}, want ${hex(MENU_BAR[mode])}; ${JSON.stringify(seen)}`)
+    }
+    if (seen[0].status === seen[1].status || seen[0].bar === seen[1].bar) return fail(`dark and light read the same: ${JSON.stringify(seen)}`)
+    return ok(seen.map((s) => `${s.mode}: status ${s.status}, menu bar ${s.bar}`).join('; '))
+  }
+
+  // Hanpan UI font (?embedded=hanpan): the interface's Hangul is drawn with the PC's own face,
+  // read at startup without a user gesture (the host allows local-fonts). Windows: Malgun Gothic
+  // within 10 s of the app's first reply; elsewhere NanumGothic (the fallback) is accepted too.
+  // The timeline, polled from the moment this script is in the page, says how long after the
+  // app first answered the face arrived: until then the first frames draw Hangul in NanumGothic,
+  // and labels change width when the face arrives (Task 4 measured 6.4 % wider with the PC face).
+  const timeline = { injected: Math.round(performance.now()) }
+  if (/(^|[?&])embedded=hanpan(&|$)/.test(location.search)) {
+    ;(async () => {
+      const api = await waitFor(() => window.photocraft ?? window.vectorcraft, 60000)
+      if (!api) return
+      timeline.api = Math.round(performance.now())
+      while (performance.now() - timeline.api < 60000) {
+        try {
+          const s = await api.request('hanpan.status', {})
+          const t = Math.round(performance.now())
+          if (timeline.firstReply === undefined) Object.assign(timeline, { firstReply: t, firstFont: s?.uiFont })
+          if (s?.uiFont && s.uiFont !== 'NanumGothic') {
+            Object.assign(timeline, { faceAt: t, face: s.uiFont })
+            return
+          }
+        } catch (e) {
+          timeline.error = String(e && e.message)
+          return
+        }
+        await sleep(50)
+      }
+    })()
+  }
+  checks.font = async ({ global }) => {
+    const api = await waitFor(() => window[global], 60000)
+    if (!api) return fail(`no window.${global}`)
+    if (!/(^|[?&])embedded=hanpan(&|$)/.test(location.search)) return fail(`no embedded=hanpan in ${location.search}`)
+    const windows = /Windows/.test(navigator.userAgent)
+    await waitFor(() => timeline.firstReply !== undefined || timeline.error, 60000)
+    if (timeline.error) return fail(`hanpan.status: ${timeline.error}`)
+    if (timeline.firstReply === undefined) return fail('hanpan.status gave no reply in 60s')
+    const deadline = timeline.firstReply + 10000
+    while (performance.now() < deadline && timeline.faceAt === undefined) await sleep(100)
+    const status = await api.request('hanpan.status', {})
+    const t = (n) => (n === undefined ? '-' : `${n}ms`)
+    const when =
+      timeline.faceAt === undefined
+        ? 'no PC face 10s after the first reply'
+        : timeline.faceAt <= timeline.firstReply
+          ? "face already there at the app's first reply (+0ms)"
+          : `face arrived +${timeline.faceAt - timeline.firstReply}ms after the app's first reply (which drew ${timeline.firstFont})`
+    const detail = `uiFont ${status?.uiFont}; ${when}; since page load: api ${t(timeline.api)}, first reply ${t(timeline.firstReply)}, face ${t(timeline.faceAt)}`
+    if (status?.uiFont === 'Malgun Gothic') return ok(detail)
+    if (!windows && status?.uiFont === 'NanumGothic') return ok(`${detail} (not Windows: fallback accepted)`)
+    return fail(detail)
+  }
+
   window.__smoke = {
     async run(name, ctx) {
       const check = checks[name]

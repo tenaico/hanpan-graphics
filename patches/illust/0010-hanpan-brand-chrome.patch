@@ -1,0 +1,1462 @@
+diff --git a/apps/vectorcraft-web/index.html b/apps/vectorcraft-web/index.html
+index 2ccfc271b0ff5040b41390ac2998eba8031d4ae5..d1b0a3be53bd7406d4afedc9823c69f0c3d04f28 100644
+--- a/apps/vectorcraft-web/index.html
++++ b/apps/vectorcraft-web/index.html
+@@ -8,7 +8,7 @@
+   <meta name="apple-mobile-web-app-title" content="VectorCraft">
+   <meta name="apple-mobile-web-app-status-bar-style" content="black">
+   <meta name="theme-color" content="#262626">
+-  <title>VectorCraft</title>
++  <title>Illustration editor</title>
+   <!-- Tab and home-screen icons: copied from assets/app-icon (one folder per size, the PNG names are equal). -->
+   <link data-trunk rel="copy-file" href="../../assets/app-icon/hicolor/scalable/apps/ai.storyteller.vectorcraft.svg" data-target-path="icons" />
+   <link data-trunk rel="copy-file" href="../../assets/app-icon/hicolor/32x32/apps/ai.storyteller.vectorcraft.png" data-target-path="icons/32" />
+@@ -19,7 +19,8 @@
+   <link data-trunk rel="rust" data-bin="vectorcraft-web" data-wasm-opt="z" data-weak-refs />
+   <style>
+     /* iPad: no page scroll, bounce, pinch zoom, text selection or callout; the app takes the gestures. */
+-    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #262626;
++    html { background: #262626; }
++    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden;
+       overscroll-behavior: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+       -webkit-tap-highlight-color: transparent; -webkit-text-size-adjust: 100%; }
+     /* Inside the safe areas (notch, home indicator) of a full-screen app. */
+@@ -29,11 +30,26 @@
+       height: calc(100% - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+       display: block; touch-action: none; }
+     #vectorcraft_loading { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+-      color: #b8b8b8; font: 14px system-ui, sans-serif; pointer-events: none; }
++      color: var(--loading-text, #b8b8b8); font: 14px system-ui, sans-serif; pointer-events: none; }
+   </style>
++  <script>
++    // Hanpan: inside Hanpan (`embedded=hanpan`) the page is the host theme's pasteboard grey from
++    // the first paint (`theme=light|dark`, light when missing), so no dark page flashes first, and
++    // the loading and start-failure texts are readable on it.
++    (function () {
++      var q = new URLSearchParams(location.search);
++      if (q.get('embedded') !== 'hanpan') return;
++      var dark = q.get('theme') === 'dark';
++      var s = document.documentElement.style;
++      s.background = dark ? '#2b2b2b' : '#e6e6e6';
++      s.setProperty('--loading-text', dark ? '#a0a0a0' : '#606366');
++      var meta = document.querySelector('meta[name="theme-color"]');
++      if (meta) meta.setAttribute('content', dark ? '#2b2b2b' : '#e6e6e6');
++    })();
++  </script>
+ </head>
+ <body>
+   <canvas id="vectorcraft_canvas"></canvas>
+-  <div id="vectorcraft_loading">Loading VectorCraft&hellip;</div>
++  <div id="vectorcraft_loading">Loading&hellip;</div>
+ </body>
+ </html>
+diff --git a/apps/vectorcraft-web/src/web.rs b/apps/vectorcraft-web/src/web.rs
+index aab8cc534c651de732bd4b100f756b6419f3682f..23a038f5354bf36130b14df3de6a7ae6f1bb7799 100644
+--- a/apps/vectorcraft-web/src/web.rs
++++ b/apps/vectorcraft-web/src/web.rs
+@@ -200,6 +200,9 @@ fn detect_language() {
+         tags.extend(navigator.language());
+     }
+     i18n::set_system_locales(tags.as_slice());
++    // Hanpan: inside Hanpan the page's own texts (loading, failing to start) call the app by
++    // Hanpan's name, as the app's frames do (`i18n::set_host_names`)
++    i18n::set_host_names(vectorcraft_ui_egui::embedded::requested(&query()));
+     // Hanpan: <html lang> follows the language the interface starts in (Korean line breaking, screen readers)
+     if let Some(root) = web_sys::window().and_then(|w| w.document()).and_then(|d| d.document_element()) {
+         let _ = root.set_attribute("lang", i18n::system_lang().code());
+diff --git a/crates/ui-egui/src/app.rs b/crates/ui-egui/src/app.rs
+index b82495325250b18daa29168162c2aa16a47039f5..d50834fa3638f4542708c8f259d0f1db0f658c40 100644
+--- a/crates/ui-egui/src/app.rs
++++ b/crates/ui-egui/src/app.rs
+@@ -261,6 +261,8 @@ impl VectorcraftApp {
+         let dialog_was_open = self.ui.dialog.is_some();
+         let lang = self.ui_language();
+         i18n::set_current(lang);
++        // Hanpan: embedded mode calls the app by Hanpan's name
++        i18n::set_host_names(self.services.embedded);
+         // The engine gives new type the Japanese defaults while the UI is in Japanese.
+         if self.session.ui_language.as_deref() != Some(lang.code()) {
+             self.session.ui_language = Some(lang.code().to_string());
+diff --git a/crates/ui-egui/src/app/links.rs b/crates/ui-egui/src/app/links.rs
+index 7d9116290813146cfe8eaf119e64c60784325c53..ec5ae6a9c6bd93dc7051822523b20da7418be299 100644
+--- a/crates/ui-egui/src/app/links.rs
++++ b/crates/ui-egui/src/app/links.rs
+@@ -32,6 +32,10 @@ impl VectorcraftApp {
+ 
+     /// Run a Help link command and open the URL it returns.
+     pub fn open_link(&mut self, id: &str) {
++        // Hanpan: links out of the app (`help.github`) don't open inside Hanpan
++        if self.services.embedded && crate::embedded::blocks(id, self.session.active().is_some()) {
++            return;
++        }
+         if let Ok(v) = self.run(id, serde_json::json!({}))
+             && let Some(u) = v["url"].as_str()
+         {
+diff --git a/crates/ui-egui/src/canvas/home.rs b/crates/ui-egui/src/canvas/home.rs
+index c4a6311dcec14341938ce048e878d2407e2cda1a..40edd1bf3186affbb16a8622c98e5509ef411727 100644
+--- a/crates/ui-egui/src/canvas/home.rs
++++ b/crates/ui-egui/src/canvas/home.rs
+@@ -25,9 +25,14 @@ pub(super) fn home(app: &mut VectorcraftApp, ui: &mut Ui, rect: egui::Rect) {
+ /// The Home screen's column: welcome, New / Open, Recent Files, presets and community links.
+ fn home_content(app: &mut VectorcraftApp, ui: &mut Ui) {
+     let t = Tokens::get(ui.ctx());
+-    ui.label(egui::RichText::new(tl!("Welcome to VectorCraft")).font(theme::semibold(26.0)).color(t.text));
+-    ui.add_space(4.0);
+-    ui.label(egui::RichText::new(tl!("Vector illustration — fast, open, scriptable.")).size(14.0).color(t.text_dim));
++    // Hanpan: inside Hanpan the Home screen speaks in Hanpan's voice, without the app's name or tagline
++    if app.services.embedded {
++        ui.label(egui::RichText::new(tl!("Create a new drawing or open a file.")).font(theme::semibold(26.0)).color(t.text));
++    } else {
++        ui.label(egui::RichText::new(tl!("Welcome to VectorCraft")).font(theme::semibold(26.0)).color(t.text));
++        ui.add_space(4.0);
++        ui.label(egui::RichText::new(tl!("Vector illustration — fast, open, scriptable.")).size(14.0).color(t.text_dim));
++    }
+     ui.add_space(22.0);
+     ui.horizontal(|ui| {
+         if widgets::primary_button(ui, tl!("New file")).clicked() {
+diff --git a/crates/ui-egui/src/chrome.rs b/crates/ui-egui/src/chrome.rs
+index ed659778e0e62033ef811e1e5441d668994b0530..bf258d7e0d7eb989ddc01a6c33636cbf83676e2a 100644
+--- a/crates/ui-egui/src/chrome.rs
++++ b/crates/ui-egui/src/chrome.rs
+@@ -59,7 +59,8 @@ pub fn app_bar(app: &mut VectorcraftApp, ui: &mut Ui) {
+         }
+         ui.horizontal_centered(|ui| {
+             // With the system title bar the OS draws its own icon: no in-app brand mark.
+-            if !system {
++            // Hanpan: nor inside Hanpan, whose tab names the app
++            if !system && !app.services.embedded {
+                 let (r, _) = ui.allocate_exact_size(vec2(MARK, MARK), Sense::hover());
+                 crate::brand::paint_mark(ui, r);
+                 ui.add_space(6.0);
+@@ -109,7 +110,8 @@ pub fn app_bar(app: &mut VectorcraftApp, ui: &mut Ui) {
+                     app.ui.palette_query.clear();
+                 }
+             }
+-            if app.services.native_menu.is_some() {
++            // Hanpan: no app name inside Hanpan
++            if app.services.native_menu.is_some() && !app.services.embedded {
+                 let title = ui.painter().layout_no_wrap("VectorCraft".into(), egui::FontId::proportional(13.5), t.text);
+                 let title_rect = egui::Rect::from_center_size(full.center(), title.size());
+                 // Keep the title centered only while the interactive groups leave room for it.
+@@ -135,8 +137,15 @@ pub fn system_title_bar(app: &VectorcraftApp) -> bool {
+ 
+ /// The OS window title: the active document's name suffixed with the app name (a `*` prefix
+ /// marks unsaved changes, like the `*` in the document tabs), or just the app name with no
+-/// document open.
++/// document open. Hanpan: inside Hanpan only the document's name (none without a document).
+ pub fn window_title(app: &VectorcraftApp) -> String {
++    if app.services.embedded {
++        return app
++            .session
++            .active()
++            .map(|d| format!("{}{}", if d.is_dirty() { "*" } else { "" }, crate::i18n::default_name(crate::i18n::current(), &d.title())))
++            .unwrap_or_default();
++    }
+     app.session
+         .active()
+         .map(|d| format!("{}{} \u{2014} VectorCraft", if d.is_dirty() { "*" } else { "" }, crate::i18n::default_name(crate::i18n::current(), &d.title())))
+diff --git a/crates/ui-egui/src/dialogs/about.rs b/crates/ui-egui/src/dialogs/about.rs
+index a2314e832d46db9a3c1dfa8465cde3cd45db45ad..2668f0d8752bbb04f971dd6adbef9778e2f5e9c0 100644
+--- a/crates/ui-egui/src/dialogs/about.rs
++++ b/crates/ui-egui/src/dialogs/about.rs
+@@ -59,8 +59,11 @@ fn about_tab(app: &mut VectorcraftApp, ui: &mut egui::Ui) {
+             ));
+         });
+     });
+-    ui.add_space(12.0);
+-    crate::community::links(app, ui);
++    // Hanpan: no link out of the app inside Hanpan (the name and licences stay)
++    if !app.services.embedded {
++        ui.add_space(12.0);
++        crate::community::links(app, ui);
++    }
+     ui.add_space(12.0);
+     ui.label("Based on VectorCraft by the ArtCraft team (MIT or Apache-2.0), modified for Hanpan.");
+     ui.add_space(6.0);
+diff --git a/crates/ui-egui/src/dialogs/pdf_presets.rs b/crates/ui-egui/src/dialogs/pdf_presets.rs
+index 10f7e0e451c4aa546aef7d221ab42616ad9bdb99..60c5f1483e49863d96437e5f631aa6bb4bc5b835 100644
+--- a/crates/ui-egui/src/dialogs/pdf_presets.rs
++++ b/crates/ui-egui/src/dialogs/pdf_presets.rs
+@@ -93,10 +93,13 @@ fn body(app: &mut VectorcraftApp, ui: &mut egui::Ui, d: &mut Dialog) -> bool {
+         ui.add_space(18.0);
+         ui.vertical(|ui| {
+             ui.set_width(340.0);
+-            ui.label(egui::RichText::new(&preset.name).color(t.text_strong).strong());
++            // Hanpan: a built-in preset's name and description read in the UI language inside Hanpan
++            let lang = crate::i18n::current();
++            let shown = |s: &'_ str| if builtin { crate::i18n::builtin_shown(lang, s).to_string() } else { s.to_string() };
++            ui.label(egui::RichText::new(shown(&preset.name)).color(t.text_strong).strong());
+             if !preset.description.is_empty() {
+                 ui.add_space(4.0);
+-                ui.label(egui::RichText::new(&preset.description).color(t.text));
++                ui.label(egui::RichText::new(shown(&preset.description)).color(t.text));
+             }
+             ui.add_space(10.0);
+             details(ui, &t, preset, builtin);
+@@ -123,7 +126,7 @@ fn body(app: &mut VectorcraftApp, ui: &mut egui::Ui, d: &mut Dialog) -> bool {
+ /// what Save PDF can't honour or apply yet.
+ fn details(ui: &mut egui::Ui, t: &Tokens, preset: &vectorcraft_pdf::PdfPreset, builtin: bool) {
+     let dim = |ui: &mut egui::Ui, text: &str| ui.label(egui::RichText::new(tl!(text)).color(t.text_dim).size(11.5));
+-    widgets::dim_label(ui, &crate::i18n::fmt(tl!("Differences from {preset}:"), &[("preset", pdf::DEFAULT_PRESET)]));
++    widgets::dim_label(ui, &crate::i18n::fmt(tl!("Differences from {preset}:"), &[("preset", crate::i18n::builtin_shown(crate::i18n::current(), pdf::DEFAULT_PRESET))]));
+     let base = vectorcraft_pdf::builtin_preset(pdf::DEFAULT_PRESET).map(|p| p.settings).unwrap_or_default();
+     let mut changed = pdf::changes(&preset.settings, &base);
+     changed.sort_by_key(|c| section_of(c["option"].as_str().unwrap_or_default()));
+diff --git a/crates/ui-egui/src/dialogs/save_pdf.rs b/crates/ui-egui/src/dialogs/save_pdf.rs
+index 72a8d64ac9e35519aea2a29c88380d1dc6155d3a..1ad927098c40ccfc2e333db9de203a11cab4f056 100644
+--- a/crates/ui-egui/src/dialogs/save_pdf.rs
++++ b/crates/ui-egui/src/dialogs/save_pdf.rs
+@@ -601,7 +601,9 @@ pub(super) fn profile_pick(ui: &mut egui::Ui, d: &mut Dialog, path: &str, names:
+     let blank = names.first().copied().unwrap_or_default();
+     let current = get(d, path).as_str().filter(|s| !s.is_empty()).unwrap_or(blank).to_string();
+     ui.add_enabled_ui(enabled, |ui| {
+-        if let Some(i) = super::mixed_dropdown(ui, path, &current, names, 300.0, |k| k < builtins) {
++        // Hanpan: inside Hanpan the built-in profiles read in the UI language too (one names the app)
++        let builtin = |k: usize| k < builtins || names.get(k).is_some_and(|n| crate::i18n::hosted_builtin_profile(n));
++        if let Some(i) = super::mixed_dropdown(ui, path, &current, names, 300.0, builtin) {
+             set(d, path, json!(if i == 0 { "" } else { names.get(i).copied().unwrap_or_default() }));
+         }
+     });
+diff --git a/crates/ui-egui/src/hanpan_brand_tests.rs b/crates/ui-egui/src/hanpan_brand_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..0156184e4a6a2500a236aaa0c7784d4992bc30e2
+--- /dev/null
++++ b/crates/ui-egui/src/hanpan_brand_tests.rs
+@@ -0,0 +1,261 @@
++//! Hanpan: inside Hanpan (`?embedded=hanpan`) the chrome (app bar, menus, panels, dialogs, Home
++//! screen, status line) shows no VectorCraft name or mark, except the About window; the Home
++//! screen speaks in Hanpan's voice. The standalone app is unchanged.
++
++use std::sync::{Arc, Mutex};
++
++use serde_json::json;
++
++use crate::VectorcraftApp;
++use crate::menus::Entry;
++
++fn app(embedded: bool, language: &str) -> VectorcraftApp {
++    let mut app = VectorcraftApp::new(vectorcraft_engine::Session::new(), crate::Services { embedded, ..Default::default() });
++    app.session.prefs.interface_language = language.to_string();
++    // The app bar draws the in-app mark (as the web build and the custom title bar do).
++    app.custom_titlebar = true;
++    app
++}
++
++fn collect(shape: &egui::Shape, out: &mut Vec<String>) {
++    match shape {
++        egui::Shape::Text(t) => out.push(t.galley.text().to_string()),
++        egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| collect(s, out)),
++        _ => {}
++    }
++}
++
++/// One headless frame of the whole window: every text it painted, and whether it painted the
++/// brand mark.
++fn frame(app: &mut VectorcraftApp, ctx: &egui::Context) -> (Vec<String>, bool) {
++    let screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 900.0)));
++    let mut out = ctx.run_ui(egui::RawInput { screen_rect, ..Default::default() }, |ui| {
++        app.logic(ui.ctx());
++        app.ui(ui);
++    });
++    out.textures_delta.clear();
++    let mark = crate::brand::texture_id(ctx);
++    let mut texts = Vec::new();
++    out.shapes.iter().for_each(|c| collect(&c.shape, &mut texts));
++    let marked = out.shapes.iter().any(|c| matches!(&c.shape, egui::Shape::Mesh(m) if m.texture_id == mark));
++    (texts, marked)
++}
++
++/// A few frames (fonts and layout settle), the last one's texts and mark.
++fn frames(app: &mut VectorcraftApp, ctx: &egui::Context) -> (Vec<String>, bool) {
++    for _ in 0..3 {
++        frame(app, ctx);
++    }
++    frame(app, ctx)
++}
++
++fn context() -> egui::Context {
++    let ctx = egui::Context::default();
++    crate::theme::install_fonts(&ctx);
++    ctx
++}
++
++fn named(texts: &[String]) -> Vec<&String> {
++    texts.iter().filter(|t| t.contains(crate::i18n::APP_NAME)).collect()
++}
++
++/// The Help menu's rows as the menus show them now: (English source, label).
++fn help_rows(app: &VectorcraftApp) -> Vec<(&'static str, String)> {
++    let tree = crate::menus::menu_tree();
++    let help = &tree.iter().find(|(title, _)| *title == "Help").expect("a Help menu").1;
++    help.iter()
++        .filter_map(|it| match crate::menus::entry(app, it)? {
++            Entry::Item(row) => Some((row.source, row.label.to_string())),
++            _ => None,
++        })
++        .collect()
++}
++
++#[test]
++fn embedded_app_bar_and_window_title_have_no_name_or_mark() {
++    for language in ["fr", "en"] {
++        let ctx = context();
++        let mut app = app(true, language);
++        let (texts, marked) = frames(&mut app, &ctx);
++        assert!(!marked, "{language}: no brand mark in the app bar");
++        assert!(named(&texts).is_empty(), "{language}: {:?}", named(&texts));
++        assert_eq!(crate::chrome::window_title(&app), "", "{language}: no document, no title");
++        app.run("file.new", json!({"width": 100, "height": 100, "name": "foo.svg"})).unwrap();
++        let (texts, marked) = frames(&mut app, &ctx);
++        assert!(!marked && named(&texts).is_empty(), "{language}: with a document: {:?}", named(&texts));
++        assert_eq!(crate::chrome::window_title(&app), "foo.svg");
++    }
++    // The macOS-style centred title is not drawn either.
++    let ctx = context();
++    let mut app = app(true, "en");
++    app.services.native_menu = Some(crate::native_menu::NativeMenu::new(Box::new(NoMenus)));
++    let mut out = ctx.run_ui(egui::RawInput::default(), |ui| crate::chrome::app_bar(&mut app, ui));
++    out.textures_delta.clear();
++    let mut texts = Vec::new();
++    out.shapes.iter().for_each(|c| collect(&c.shape, &mut texts));
++    assert!(named(&texts).is_empty(), "{:?}", named(&texts));
++}
++
++struct NoMenus;
++impl crate::native_menu::Backend for NoMenus {
++    fn sync(&mut self, _: &crate::native_menu::MenuBar) {}
++    fn drain(&mut self) -> Vec<crate::native_menu::Event> {
++        Vec::new()
++    }
++}
++
++#[test]
++fn embedded_help_menu_has_no_vectorcraft_help() {
++    let app = app(true, "en");
++    let rows = help_rows(&app);
++    assert!(!rows.iter().any(|(source, _)| *source == "VectorCraft Help…"), "{rows:?}");
++    assert!(rows.iter().any(|(source, _)| *source == "Search Commands…"), "the rest stays: {rows:?}");
++    // The About item keeps the name (the About window's own title).
++    assert!(rows.iter().any(|(_, label)| label == "About VectorCraft"), "{rows:?}");
++    let listed = crate::menus::menu_entries(&app);
++    assert!(!listed.iter().any(|e| e.label == "VectorCraft Help…"), "ui.menu.list lists it");
++}
++
++#[test]
++fn embedded_home_speaks_in_hanpans_voice() {
++    for language in ["en", "fr"] {
++        let ctx = context();
++        let mut app = app(true, language);
++        let (texts, _) = frames(&mut app, &ctx);
++        let lang = crate::i18n::Lang::from_code(language).unwrap();
++        let title = crate::i18n::tr(lang, "Create a new drawing or open a file.");
++        assert!(texts.iter().any(|t| t == title), "{language}: {title:?} in {texts:?}");
++        let tagline = crate::i18n::tr(lang, "Vector illustration — fast, open, scriptable.");
++        assert!(!texts.iter().any(|t| t == tagline), "{language}: no tagline: {texts:?}");
++        assert!(named(&texts).is_empty(), "{language}: {:?}", named(&texts));
++        // New file and the presets stay.
++        assert!(texts.iter().any(|t| t == crate::i18n::tr(lang, "New file")), "{language}: {texts:?}");
++    }
++    let ko = crate::i18n::Lang::from_code("ko").unwrap();
++    assert_eq!(crate::i18n::tr(ko, "Create a new drawing or open a file."), "새 그림을 만들거나 파일을 여세요.");
++}
++
++#[test]
++fn embedded_about_keeps_the_name_and_opens_no_link() {
++    let opened = Arc::new(Mutex::new(Vec::<String>::new()));
++    let o = opened.clone();
++    let ctx = context();
++    let mut app = app(true, "en");
++    app.services.open_url = Some(Box::new(move |u: &str| o.lock().unwrap().push(u.to_string())));
++    app.ui.about = true;
++    let (texts, marked) = frames(&mut app, &ctx);
++    for want in ["About VectorCraft", "VectorCraft"] {
++        assert!(texts.iter().any(|t| t == want), "{want:?} in {texts:?}");
++    }
++    assert!(texts.iter().any(|t| t.starts_with("Based on VectorCraft by the ")), "the credit: {texts:?}");
++    assert!(texts.iter().any(|t| t.ends_with("Icons: Lucide (ISC) + VectorCraft.")), "the licences: {texts:?}");
++    assert!(marked, "the About window keeps the mark");
++    assert!(!texts.iter().any(|t| t == "Source code on GitHub"), "no link out of the app: {texts:?}");
++    app.open_link("help.github");
++    assert!(opened.lock().unwrap().is_empty(), "GitHub does not open: {:?}", opened.lock().unwrap());
++}
++
++#[test]
++fn embedded_status_line_uses_hanpans_name() {
++    let ctx = context();
++    let mut app = app(true, "en");
++    app.run("file.new", json!({"width": 100, "height": 100})).unwrap();
++    app.status("Lock Workspace is not available in VectorCraft");
++    let (texts, _) = frames(&mut app, &ctx);
++    assert!(texts.iter().any(|t| t == "Lock Workspace is not available in AI Illustration"), "{texts:?}");
++    assert!(named(&texts).is_empty(), "{:?}", named(&texts));
++    app.status("not a VectorCraft file: format is `svg`");
++    let (texts, _) = frames(&mut app, &ctx);
++    assert!(texts.iter().any(|t| t == "not an AI Illustration file: format is `svg`"), "{texts:?}");
++    // Korean, without drawing (the test machine may have no Hangul face): the status line's text.
++    let ko = crate::i18n::Lang::from_code("ko").unwrap();
++    crate::i18n::set_host_names(true);
++    crate::i18n::set_current(ko);
++    assert_eq!(crate::embedded::shown_status("not a VectorCraft file: x"), "AI 일러스트 파일이 아닙니다: x");
++    assert_eq!(crate::embedded::shown_status("Lock Workspace is not available in VectorCraft"), "Lock Workspace is not available in AI 일러스트");
++    crate::i18n::set_current(crate::i18n::Lang::EN);
++    crate::i18n::set_host_names(false);
++}
++
++#[test]
++fn not_embedded_keeps_the_brand() {
++    let opened = Arc::new(Mutex::new(Vec::<String>::new()));
++    let o = opened.clone();
++    let ctx = context();
++    let mut app = app(false, "en");
++    app.services.open_url = Some(Box::new(move |u: &str| o.lock().unwrap().push(u.to_string())));
++    let (texts, marked) = frames(&mut app, &ctx);
++    assert!(marked, "the brand mark");
++    assert!(!crate::i18n::host_names());
++    for want in ["Welcome to VectorCraft", "Vector illustration — fast, open, scriptable.", "Source code on GitHub"] {
++        assert!(texts.iter().any(|t| t == want), "{want:?} in {texts:?}");
++    }
++    assert!(!texts.iter().any(|t| t == "Create a new drawing or open a file."), "{texts:?}");
++    assert_eq!(crate::chrome::window_title(&app), "VectorCraft");
++    assert!(help_rows(&app).iter().any(|(source, _)| *source == "VectorCraft Help…"));
++    assert!(crate::menus::menu_entries(&app).iter().any(|e| e.label == "VectorCraft Help…"));
++    app.run("file.new", json!({"width": 100, "height": 100, "name": "foo.svg"})).unwrap();
++    app.status("Lock Workspace is not available in VectorCraft");
++    let (texts, _) = frames(&mut app, &ctx);
++    assert!(texts.iter().any(|t| t == "Lock Workspace is not available in VectorCraft"), "{texts:?}");
++    assert_eq!(crate::chrome::window_title(&app), "foo.svg \u{2014} VectorCraft");
++    app.open_link("help.github");
++    assert_eq!(*opened.lock().unwrap(), ["https://github.com/storytold/vectorcraft"]);
++}
++
++/// Fix round 1: the app's own built-in names and texts (the PDF presets' names and descriptions,
++/// the built-in colour profiles) shown as they are elsewhere read in the UI language inside Hanpan,
++/// without the app's name; a preset the user named keeps its name.
++#[test]
++fn embedded_pdf_presets_dialog_shows_no_name_but_keeps_the_users() {
++    const MINE: &str = "My VectorCraft Look";
++    const MINE_ABOUT: &str = "Made for VectorCraft fans";
++    let ctx = context();
++    let mut app = app(true, "en");
++    app.session.prefs.pdf_presets.push(vectorcraft_pdf::PdfPreset { name: MINE.into(), description: MINE_ABOUT.into(), settings: Default::default() });
++    // On open the default (built-in) preset is selected: its name, description and the
++    // "Differences from" line.
++    crate::dialogs::pdf_presets::open(&mut app, None);
++    let (texts, _) = frames(&mut app, &ctx);
++    assert!(texts.iter().any(|t| t == "AI Illustration Default"), "{texts:?}");
++    assert!(texts.iter().any(|t| t.starts_with("Keeps the document editable: AI Illustration reopens")), "{texts:?}");
++    assert!(texts.iter().any(|t| t == "Differences from AI Illustration Default:"), "{texts:?}");
++    let shown: Vec<&String> = named(&texts).into_iter().filter(|t| *t != MINE).collect();
++    assert!(shown.is_empty(), "only the user's preset names the app: {shown:?}");
++    assert!(texts.iter().any(|t| t == MINE), "the user's preset in the list: {texts:?}");
++    // The user's preset, selected, reads as the user wrote it.
++    crate::dialogs::pdf_presets::open(&mut app, Some(MINE));
++    let (texts, _) = frames(&mut app, &ctx);
++    assert!(texts.iter().filter(|t| *t == MINE).count() >= 2, "in the list and as the title: {texts:?}");
++    assert!(texts.iter().any(|t| t == MINE_ABOUT), "{texts:?}");
++    assert!(texts.iter().any(|t| t == "Differences from AI Illustration Default:"), "{texts:?}");
++}
++
++/// The Separations panel's colour settings list the built-in CMYK profile without the app's name
++/// inside Hanpan, and as before outside it.
++#[test]
++fn embedded_separations_panel_profiles_show_no_name() {
++    let texts_of = |embedded: bool| {
++        let ctx = context();
++        let mut app = app(embedded, "en");
++        app.run("file.new", json!({"width": 100, "height": 100})).unwrap();
++        let mut texts = Vec::new();
++        for _ in 0..3 {
++            let screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 900.0)));
++            let mut out = ctx.run_ui(egui::RawInput { screen_rect, ..Default::default() }, |ui| {
++                app.logic(ui.ctx());
++                crate::panels::separations::show(&mut app, ui);
++            });
++            out.textures_delta.clear();
++            texts.clear();
++            out.shapes.iter().for_each(|c| collect(&c.shape, &mut texts));
++        }
++        texts
++    };
++    let texts = texts_of(true);
++    assert!(texts.iter().any(|t| t == "AI Illustration Generic CMYK (SWOP-like)"), "{texts:?}");
++    assert!(named(&texts).is_empty(), "{:?}", named(&texts));
++    crate::i18n::set_host_names(false);
++    let texts = texts_of(false);
++    assert!(texts.iter().any(|t| t == vectorcraft_color::cms::GENERIC_CMYK), "standalone as before: {texts:?}");
++}
+diff --git a/crates/ui-egui/src/i18n.rs b/crates/ui-egui/src/i18n.rs
+index 8e59e3d93e757af8d49b88c29a3326676560b0a1..a1086ac0b460ec8e42a27796d538398b6d6fb183 100644
+--- a/crates/ui-egui/src/i18n.rs
++++ b/crates/ui-egui/src/i18n.rs
+@@ -30,7 +30,7 @@
+ mod catalog;
+ 
+ use std::sync::OnceLock;
+-use std::sync::atomic::{AtomicUsize, Ordering};
++use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+ 
+ use catalog::Catalog;
+ 
+@@ -593,23 +593,31 @@ pub fn t(s: &str) -> &str {
+ 
+ /// Translate an English UI string; unknown strings come back unchanged.
+ pub fn tr(lang: Lang, s: &str) -> &str {
+-    lang.catalog().plain(s).unwrap_or(s)
++    // Hanpan: embedded mode calls the app by Hanpan's name
++    match lang.catalog().plain(s) {
++        Some(text) => hosted(lang, s, text, false),
++        None => hosted(lang, s, s, true),
++    }
+ }
+ 
+ /// Like [`tr`], for an English string that needs a disambiguating `context`.
+ pub fn tr_ctx<'a>(lang: Lang, context: &str, s: &'a str) -> &'a str {
+-    lang.catalog().contextual(context, s).unwrap_or_else(|| tr(lang, s))
++    // Hanpan: embedded mode calls the app by Hanpan's name
++    lang.catalog().contextual(context, s).map_or_else(|| tr(lang, s), |text| hosted(lang, s, text, false))
+ }
+ 
+ /// A name the app gives something (a default swatch's), translated where the current language has
+ /// a `context` row for it; any other name (one the user gave) comes back as it is.
+ pub fn t_name<'a>(context: &str, name: &'a str) -> &'a str {
+-    current().catalog().contextual(context, name).unwrap_or(name)
++    // Hanpan: embedded mode calls the app by Hanpan's name (in the app's names, not the user's)
++    let lang = current();
++    lang.catalog().contextual(context, name).map_or(name, |text| hosted(lang, name, text, false))
+ }
+ 
+ /// A string keyed by its command id, falling back to the translation of the English `label`.
+ pub fn tr_id<'a>(lang: Lang, id: &str, label: &'a str) -> &'a str {
+-    lang.catalog().id(id).unwrap_or_else(|| tr(lang, label))
++    // Hanpan: embedded mode calls the app by Hanpan's name
++    lang.catalog().id(id).map_or_else(|| tr(lang, label), |text| hosted(lang, id, text, false))
+ }
+ 
+ /// [`tr_id`] in the current language.
+@@ -629,8 +637,10 @@ pub fn fmt(template: &str, args: &[(&str, &str)]) -> String {
+ /// A plural-aware message: `one`/`other` are the English forms (with `{n}` where the count goes).
+ pub fn trn(lang: Lang, n: u64, one: &str, other: &str) -> String {
+     let idx = (lang.0.plural)(n);
+-    let text = lang.catalog().plural(one, other, idx).unwrap_or(if n == 1 { one } else { other });
+-    fmt(text, &[("n", &n.to_string())])
++    let found = lang.catalog().plural(one, other, idx);
++    let text = found.unwrap_or(if n == 1 { one } else { other });
++    // Hanpan: embedded mode calls the app by Hanpan's name (in the text, before `{n}` is filled)
++    fmt(&rename_text(lang, text, found.is_none()), &[("n", &n.to_string())])
+ }
+ 
+ /// An entry of a list that mixes interface labels with names (user, file or system data) as
+@@ -654,14 +664,28 @@ pub fn message(lang: Lang, s: &str) -> String {
+ }
+ 
+ fn message_at(lang: Lang, s: &str, depth: usize) -> String {
+-    let Some((forms, caps)) = lang.catalog().message_forms(s) else { return s.to_string() };
++    // Hanpan: embedded mode calls the app by Hanpan's name in a message's own words, never in the
++    // values it carries (file names, paths): a message the language has no row for is split by
++    // the English templates (also when they know it better than the language's own general one,
++    // such as `{what} ({why})`), and one no template knows at all is renamed outside paths and quotes.
++    let naming = host_names() && s.contains(APP_NAME);
++    let own = lang.catalog().message_match(s);
++    let found = match (own, naming.then(|| english_messages().message_match(s)).flatten()) {
++        (Some(own), Some(en)) if en.2 > own.2 => Some((en, true)),
++        (Some(own), _) => Some((own, false)),
++        (None, en) => en.map(|en| (en, true)),
++    };
++    let Some(((forms, caps, _), english)) = found else {
++        return if naming && depth == MESSAGE_DEPTH { rename_loose(lang, s) } else { s.to_string() };
++    };
+     let count = caps.iter().find(|(k, _)| *k == "n").and_then(|(_, v)| v.parse::<u64>().ok());
+     let form = count.map_or(forms.len().saturating_sub(1), |n| (lang.0.plural)(n).min(forms.len().saturating_sub(1)));
+     let Some(template) = forms.get(form) else { return s.to_string() };
++    let template = rename_text(lang, template, english);
+     let values: Vec<(&str, String)> =
+         caps.into_iter().map(|(k, v)| (k, if depth > 1 { message_at(lang, v, depth - 1) } else { v.to_string() })).collect();
+     let args: Vec<(&str, &str)> = values.iter().map(|(k, v)| (*k, v.as_str())).collect();
+-    fill_once(template, &args)
++    fill_once(&template, &args)
+ }
+ 
+ /// Fill `{name}` placeholders in one pass: a value that holds `{name}` text stays as it is.
+@@ -691,17 +715,20 @@ fn fill_once(template: &str, args: &[(&str, &str)]) -> String {
+ /// [`message`] in the current language, remembering the last answer: the status bar asks for the
+ /// same message every frame.
+ pub fn msg(s: &str) -> String {
+-    static LAST: std::sync::Mutex<Option<(&'static str, String, String)>> = std::sync::Mutex::new(None);
++    // Hanpan: the answer also depends on Hanpan's name for the app (`host_names`)
++    static LAST: std::sync::Mutex<Option<(&'static str, bool, String, String)>> = std::sync::Mutex::new(None);
+     let lang = current();
++    let hosting = host_names();
+     let mut last = LAST.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+-    if let Some((code, src, out)) = last.as_ref()
++    if let Some((code, hosted, src, out)) = last.as_ref()
+         && *code == lang.code()
++        && *hosted == hosting
+         && src == s
+     {
+         return out.clone();
+     }
+     let out = message(lang, s);
+-    *last = Some((lang.code(), s.to_string(), out.clone()));
++    *last = Some((lang.code(), hosting, s.to_string(), out.clone()));
+     out
+ }
+ 
+@@ -781,3 +808,262 @@ pub fn default_name(lang: Lang, name: &str) -> std::borrow::Cow<'_, str> {
+     }
+     Cow::Borrowed(name)
+ }
++
++// ----------------------------------------------------------------------------- Hanpan: app name
++
++#[cfg(test)]
++mod host_name_tests;
++
++/// Hanpan: the app's own name, as the UI's English text and the catalogs write it (no catalog
++/// spells it in another script).
++pub const APP_NAME: &str = "VectorCraft";
++
++/// Hanpan: English sources that keep the original name in embedded mode: the About window's title
++/// (also the Help menu item, command id `help.about`) and its licence lines. The window's product
++/// name and credit sentence are not translated and never pass through here.
++pub const KEEP_NAME: &[&str] = &[
++    "About VectorCraft",
++    "MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft.",
++    "MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono, Noto Sans SC (OFL). Icons: Lucide (ISC) + VectorCraft.",
++];
++
++/// Hanpan: messages the engine and the UI write that name the app and have no catalog row, as
++/// templates (`{…}` where their values go), so the values in them keep their own names.
++pub const ENGINE_MESSAGES: &[&str] = &[
++    "overlay effects in a blend mode VectorCraft doesn't have (imported as Normal)",
++    "VectorCraft reads at most {max} colors and groups from a swatch exchange file, and this library has {entries}",
++    "blend modes VectorCraft doesn't have ({modes}) import as Normal",
++    "objects beyond the document range VectorCraft supports (left out)",
++    "a legacy .ai (version 7) keeps layers, groups, compound paths, clipping groups, type, colours, gradients and images, not the rest: save as VectorCraft to keep everything editable",
++    "{format} keeps the artwork but not everything a VectorCraft document holds (editable effects, symbols, swatches, styles): save as VectorCraft to keep it all editable",
++    "saved without PDF content: VectorCraft opens it as before, other apps show empty pages",
++    "the Word document was saved by Word 6.0 or Word 95, which VectorCraft doesn't read; save it as a Word 97-2003 document",
++    "the Word document was last saved with fast save, which VectorCraft doesn't read; save it again with fast save turned off",
++    "the Word document's package uses ZIP64 records, which VectorCraft doesn't read",
++    "`{name}` in the Word document uses compression method {m}, which VectorCraft doesn't read",
++    "can't open `{name}`: not a format VectorCraft reads (see document.formats)",
++    "can't place `{name}`: not a format VectorCraft reads (see document.formats)",
++    "not an image VectorCraft reads (see document.formats)",
++    "`{file}` belongs to a VectorCraft that is running",
++    "a blend VectorCraft couldn't read as a live blend comes in as its drawn steps",
++    "an envelope VectorCraft couldn't read as a live envelope comes in as its drawn art",
++    "non-native art (a placed PDF's content) that VectorCraft can't read is left out",
++    "the file draws more than VectorCraft reads: the rest was left out",
++    "text objects of kinds VectorCraft doesn't read from the file's text document yet are left out",
++    "operators VectorCraft doesn't know ({ops})",
++    "it draws nothing VectorCraft's PostScript reader can show",
++    "{n} record of kinds VectorCraft doesn't read was skipped",
++    "{n} records of kinds VectorCraft doesn't read were skipped",
++    "Lock Workspace is not available in VectorCraft",
++];
++
++/// Hanpan: is the UI text drawn with Hanpan's name for the app? One flag for the process, as the
++/// language is ([`current_index`]); one per thread in unit tests.
++fn host_flag() -> &'static AtomicBool {
++    #[cfg(not(test))]
++    {
++        static HOST: AtomicBool = AtomicBool::new(false);
++        &HOST
++    }
++    #[cfg(test)]
++    {
++        thread_local!(static HOST: &'static AtomicBool = Box::leak(Box::default()));
++        HOST.with(|h| *h)
++    }
++}
++
++/// Hanpan: draw the UI text with Hanpan's name for the app (`true` in embedded mode; the frame
++/// sets it from `Services::embedded`, next to the language).
++pub fn set_host_names(on: bool) {
++    host_flag().store(on, Ordering::Relaxed);
++}
++
++/// Hanpan: is the UI text drawn with Hanpan's name for the app?
++pub fn host_names() -> bool {
++    host_flag().load(Ordering::Relaxed)
++}
++
++/// Hanpan: what Hanpan calls the app in `lang`: "AI 일러스트" in Korean, "AI Illustration" in every
++/// other language (Hanpan's own UI uses the English name outside Korean). The catalogs' Korean
++/// particles after the name (가, 를, 는, 에서, 의) already suit 일러스트's final vowel.
++pub fn host_app_name(lang: Lang) -> &'static str {
++    if lang.code() == "ko" { "AI 일러스트" } else { "AI Illustration" }
++}
++
++/// Hanpan: `text`, a translation or English UI text in `lang`, with [`APP_NAME`] as Hanpan calls
++/// the app when [`host_names`] is on (otherwise, or without the name, `text` itself).
++pub fn rename(lang: Lang, text: &str) -> std::borrow::Cow<'_, str> {
++    rename_text(lang, text, lang == Lang::EN)
++}
++
++/// [`rename`] for text that is English (`english`) or written in `lang`. A case ending stuck to the
++/// name (Czech "VectorCraftu") goes with it: "AI Illustration" is not declined. English "a
++/// VectorCraft" reads "an AI Illustration". Lower-case identifiers such as `vectorcraft-cli` are not
++/// the name shown to people and stay. Only for the app's own text, never for a value in it.
++fn rename_text<'t>(lang: Lang, text: &'t str, english: bool) -> std::borrow::Cow<'t, str> {
++    if !host_names() || !text.contains(APP_NAME) {
++        return std::borrow::Cow::Borrowed(text);
++    }
++    let name = host_app_name(lang);
++    let mut out = String::with_capacity(text.len() + 8);
++    let mut rest = text;
++    while let Some(at) = rest.find(APP_NAME) {
++        push_before_name(&mut out, &rest[..at], english);
++        out.push_str(name);
++        rest = rest[at + APP_NAME.len()..].trim_start_matches(|c: char| c.is_ascii_lowercase());
++    }
++    out.push_str(rest);
++    std::borrow::Cow::Owned(out)
++}
++
++/// The text before a renamed name, with an English "a" before it made "an" (both of Hanpan's
++/// names start with "AI").
++fn push_before_name(out: &mut String, before: &str, english: bool) {
++    let article = before.strip_suffix("a ").filter(|lead| english && lead.chars().last().is_none_or(|c| !c.is_alphanumeric()));
++    match article {
++        Some(lead) => {
++            out.push_str(lead);
++            out.push_str("an ");
++        }
++        None => out.push_str(before),
++    }
++}
++
++/// Hanpan: an English message no template knows (the whole of it, not a value in a known one)
++/// with the name renamed where it is the message's own word: not in a path or a file name
++/// (`/`, `\`, `.svg` next to it), not inside `` ` `` or quotes, not inside a longer word.
++fn rename_loose(lang: Lang, text: &str) -> String {
++    let name = host_app_name(lang);
++    let mut out = String::with_capacity(text.len() + 8);
++    let mut from = 0;
++    let mut search = 0;
++    while let Some(found) = text[search..].find(APP_NAME) {
++        let at = search + found;
++        let end = at + APP_NAME.len();
++        search = end;
++        let before = &text[..at];
++        let after = &text[end..];
++        let quoted = before.matches('`').count() % 2 == 1
++            || before.matches('"').count() % 2 == 1
++            || before.rfind('“').is_some_and(|open| before.rfind('”').is_none_or(|close| close < open));
++        let joined_before = before.chars().last().is_some_and(|c| c.is_alphanumeric() || matches!(c, '/' | '\\' | '_' | '-' | '.'));
++        let mut next = after.chars();
++        let joined_after = match next.next() {
++            Some(c) if c.is_alphanumeric() || matches!(c, '/' | '\\' | '_' | '-') => true,
++            Some('.') => next.next().is_some_and(char::is_alphanumeric),
++            _ => false,
++        };
++        if quoted || joined_before || joined_after {
++            continue;
++        }
++        push_before_name(&mut out, &text[from..at], true);
++        out.push_str(name);
++        from = end;
++    }
++    out.push_str(&text[from..]);
++    out
++}
++
++/// Hanpan: `s`, a built-in name or text of the app's own (a preset, a colour profile, a preset's
++/// description) that its place shows as it is: inside Hanpan in `lang` (its catalog row, with
++/// Hanpan's name for the app, [`tr`]); outside Hanpan exactly as before. Never for user data.
++pub fn builtin_shown(lang: Lang, s: &str) -> &str {
++    if host_names() { tr(lang, s) } else { s }
++}
++
++/// Hanpan: is `name` one of the colour profiles built into the app ("VectorCraft Generic CMYK
++/// (SWOP-like)" …), which [`builtin_shown`] shows in the UI language inside Hanpan? Always
++/// `false` outside Hanpan, so the profile lists read as before there.
++pub fn hosted_builtin_profile(name: &str) -> bool {
++    host_names() && vectorcraft_color::cms::profiles().iter().any(|p| p.builtin && p.name == name)
++}
++
++/// Hanpan: is `source` (an English text or a command id) one whose text keeps the name?
++fn keeps_name(source: &str) -> bool {
++    source == "help.about" || KEEP_NAME.contains(&source)
++}
++
++/// Hanpan: [`rename_text`] for a lookup's result: `source` is the English text (or command id) it
++/// was looked up by, `english` whether `text` is that English text. A renamed text is built once
++/// per thread and kept (it is a catalog entry or an English UI string, a bounded set), so drawing
++/// it every frame allocates nothing. Past [`MAX_RENAMED`] texts (the catalogs hold about 50 per
++/// language) a new text is shown cut to its longest part without the name, and the console says
++/// so once: never the name, never a leak per frame.
++fn hosted<'a>(lang: Lang, source: &str, text: &'a str, english: bool) -> &'a str {
++    if !host_names() || !text.contains(APP_NAME) || keeps_name(source) {
++        return text;
++    }
++    thread_local! {
++        // [other languages, Korean] × [translation, English]: renamed text by the text it was made from
++        static RENAMED: std::cell::RefCell<[std::collections::HashMap<Box<str>, &'static str>; 4]> = Default::default();
++        static FULL_NOTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
++    }
++    RENAMED.with(|renamed| -> &'a str {
++        let mut renamed = renamed.borrow_mut();
++        let table = &mut renamed[usize::from(lang.code() == "ko") * 2 + usize::from(english)];
++        if let Some(&done) = table.get(text) {
++            return done;
++        }
++        if table.len() >= rename_limit() {
++            if !FULL_NOTED.replace(true) {
++                log::warn!("hanpan: over {} texts name the app; {text:?} and later ones are cut short", rename_limit());
++            }
++            return without_name(text);
++        }
++        let done: &'static str = Box::leak(rename_text(lang, text, english).into_owned().into_boxed_str());
++        table.insert(text.into(), done);
++        done
++    })
++}
++
++/// The longest part of `text` between the app's names (case endings dropped), trimmed.
++fn without_name(text: &str) -> &str {
++    text.split(APP_NAME)
++        .enumerate()
++        .map(|(i, part)| if i == 0 { part } else { part.trim_start_matches(|c: char| c.is_ascii_lowercase()) }.trim())
++        .max_by_key(|part| part.len())
++        .unwrap_or("")
++}
++
++/// Hanpan: the most renamed texts [`hosted`] keeps per thread, language and kind.
++pub const MAX_RENAMED: usize = 4096;
++
++#[cfg(test)]
++thread_local!(static RENAME_LIMIT: std::cell::Cell<usize> = const { std::cell::Cell::new(MAX_RENAMED) });
++
++fn rename_limit() -> usize {
++    #[cfg(test)]
++    return RENAME_LIMIT.get();
++    #[cfg(not(test))]
++    MAX_RENAMED
++}
++
++/// Hanpan (tests): lower [`MAX_RENAMED`] on this thread.
++#[cfg(test)]
++pub fn set_rename_limit(limit: usize) {
++    RENAME_LIMIT.set(limit);
++}
++
++/// Hanpan: every English message template the catalogs know (each `@msg` source, each English
++/// form of a `@msgplural` row) and [`ENGINE_MESSAGES`], each its own translation: a message in a
++/// language with no row for it, or in English, is split into its own words and its values by
++/// these. Read once, the first time a message naming the app needs it.
++fn english_messages() -> &'static Catalog {
++    static ENGLISH: OnceLock<Catalog> = OnceLock::new();
++    ENGLISH.get_or_init(|| {
++        let mut seen = std::collections::HashSet::new();
++        let sources = LANGUAGES
++            .iter()
++            .flat_map(|l| catalog::parse_entries(l.source).0)
++            .flat_map(|(ctx, src, _)| match ctx.as_str() {
++                "@msg" => vec![src],
++                "@msgplural" => src.split('|').map(str::to_string).collect(),
++                _ => vec![],
++            })
++            .chain(ENGINE_MESSAGES.iter().map(|s| s.to_string()))
++            .filter(|src| seen.insert(src.clone()))
++            .map(|src| ("@msg".to_string(), src.clone(), src))
++            .collect::<Vec<_>>();
++        Catalog::from_entries(sources)
++    })
++}
+diff --git a/crates/ui-egui/src/i18n/catalog.rs b/crates/ui-egui/src/i18n/catalog.rs
+index 1be460212a65bc639723a733eecfd0def8970bf2..a783cb913ec3c0cee5242da4c1f42afa13f24f50 100644
+--- a/crates/ui-egui/src/i18n/catalog.rs
++++ b/crates/ui-egui/src/i18n/catalog.rs
+@@ -153,8 +153,14 @@ pub fn parse_entries(text: &str) -> (Vec<Entry>, Vec<String>) {
+ 
+ impl Catalog {
+     pub fn parse(text: &str) -> Catalog {
++        Catalog::from_entries(parse_entries(text).0)
++    }
++
++    /// Hanpan: a catalog of entries already read (the English message templates of
++    /// `super::english_messages`).
++    pub fn from_entries(entries: impl IntoIterator<Item = Entry>) -> Catalog {
+         let mut c = Catalog::default();
+-        for (ctx, src, tr) in parse_entries(text).0 {
++        for (ctx, src, tr) in entries {
+             match ctx.as_str() {
+                 "" => {
+                     c.plain.insert(src, tr);
+@@ -209,14 +215,21 @@ impl Catalog {
+     /// translate (a reason after `…: {e}` is often a message of its own). The translation has one
+     /// form for an `@msg` row and the plural forms of a `@msgplural` row, of which the caller picks
+     /// one by the `{n}` value.
++    #[cfg(test)]
+     pub fn message_forms<'a>(&self, s: &'a str) -> Option<(&[String], Captures<'_, 'a>)> {
++        self.message_match(s).map(|(forms, caps, _)| (forms, caps))
++    }
++
++    /// [`Catalog::message_forms`] with how specific the match is: the bytes of the template's
++    /// literal text (all of `s` for an exact message). Hanpan: compares two catalogs' matches.
++    pub fn message_match<'a>(&self, s: &'a str) -> Option<(&[String], Captures<'_, 'a>, usize)> {
+         if let Some(tr) = self.messages.get(s) {
+-            return Some((std::slice::from_ref(tr), Vec::new()));
++            return Some((std::slice::from_ref(tr), Vec::new(), s.len()));
+         }
+         if s.len() > MAX_MESSAGE_LEN {
+             return None;
+         }
+-        self.templates.iter().find_map(|t| t.captures(s).map(|caps| (t.forms.as_slice(), caps)))
++        self.templates.iter().find_map(|t| t.captures(s).map(|caps| (t.forms.as_slice(), caps, t.literal)))
+     }
+ 
+     /// The plural form `index` of the message whose English forms are `one|other`.
+diff --git a/crates/ui-egui/src/i18n/cs.tsv b/crates/ui-egui/src/i18n/cs.tsv
+index 6e2582d9fc0258f6cd66b5a8e522224db99af57f..d8d09b49a9e1afcfe8972535a3706409fdef260c 100644
+--- a/crates/ui-egui/src/i18n/cs.tsv
++++ b/crates/ui-egui/src/i18n/cs.tsv
+@@ -3933,6 +3933,8 @@ effect	Regular	Pravidelný
+ 	Recent Files	Nedávné soubory
+ 	Vector illustration — fast, open, scriptable.	Vektorová ilustrace — rychlá, otevřená, skriptovatelná.
+ 	Welcome to VectorCraft	Vítejte ve VectorCraftu
++# Hanpan: the Home screen's title in embedded mode (no app name)
++	Create a new drawing or open a file.	Vytvořte novou kresbu nebo otevřete soubor.
+ 	Source code on GitHub	Zdrojový kód na GitHubu
+ 	All Tools	Všechny nástroje
+ 	Draw	Kresba
+diff --git a/crates/ui-egui/src/i18n/de.tsv b/crates/ui-egui/src/i18n/de.tsv
+index b801bc1186bdaf9ab31012d51c6bc229f055eeeb..674678d154e97e2a1355ddd415ab82473673a90a 100644
+--- a/crates/ui-egui/src/i18n/de.tsv
++++ b/crates/ui-egui/src/i18n/de.tsv
+@@ -3597,6 +3597,8 @@ effect	Points	Punkte
+ 	Weight	Stärke
+ 	Weight:	Stärke:
+ 	Welcome to VectorCraft	Willkommen bei VectorCraft
++# Hanpan: the Home screen's title in embedded mode (no app name)
++	Create a new drawing or open a file.	Erstellen Sie eine neue Zeichnung oder öffnen Sie eine Datei.
+ 	When pasting text	Beim Einfügen von Text
+ 	White	Weiß
+ 	Widget Position:	Widget-Position:
+diff --git a/crates/ui-egui/src/i18n/es.tsv b/crates/ui-egui/src/i18n/es.tsv
+index e95866ff446ed63a53408c521487a09bf008b70b..3b00cda38c1a018573c25f8fbe1f7abdca60aa9b 100644
+--- a/crates/ui-egui/src/i18n/es.tsv
++++ b/crates/ui-egui/src/i18n/es.tsv
+@@ -3687,6 +3687,8 @@ digits	Malayalam	Malayálam
+ 	Weight	Grosor
+ 	Weight:	Grosor:
+ 	Welcome to VectorCraft	Te damos la bienvenida a VectorCraft
++# Hanpan: the Home screen's title in embedded mode (no app name)
++	Create a new drawing or open a file.	Crea un dibujo nuevo o abre un archivo.
+ 	When pasting text	Al pegar texto
+ 	White	Blanco
+ 	Widget Position:	Posición del widget:
+diff --git a/crates/ui-egui/src/i18n/fr.tsv b/crates/ui-egui/src/i18n/fr.tsv
+index 6b3425dfe4aa7294f6af6abf913f9d558e03685e..8d9a54f94e97b263c7718b84f565303d832b1ef4 100644
+--- a/crates/ui-egui/src/i18n/fr.tsv
++++ b/crates/ui-egui/src/i18n/fr.tsv
+@@ -3679,6 +3679,8 @@ digits	Malayalam	Malayalam
+ 	Weight	Épaisseur
+ 	Weight:	Épaisseur :
+ 	Welcome to VectorCraft	Bienvenue dans VectorCraft
++# Hanpan: the Home screen's title in embedded mode (no app name)
++	Create a new drawing or open a file.	Créez un nouveau dessin ou ouvrez un fichier.
+ 	When pasting text	Lors du collage de texte
+ 	White	Blanc
+ 	Widget Position:	Position du widget :
+diff --git a/crates/ui-egui/src/i18n/host_name_tests.rs b/crates/ui-egui/src/i18n/host_name_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..56dc463acd7df9f96f3add8394d181e446c78fdc
+--- /dev/null
++++ b/crates/ui-egui/src/i18n/host_name_tests.rs
+@@ -0,0 +1,272 @@
++//! Hanpan: embedded mode calls the app by Hanpan's name for it ("AI 일러스트" in Korean, "AI
++//! Illustration" in every other language) wherever the UI's text names it, except the About
++//! window; the names in user data (file names, paths, layer names) stay as they are.
++
++use super::catalog::parse_entries;
++use super::*;
++
++/// The languages Hanpan opens the AI Illustration tab in.
++const HANPAN_LANGS: [&str; 14] = ["ko", "en", "ja", "fr", "de", "es", "id", "ru", "it", "pl", "cs", "nl", "vi", "pt-br"];
++
++fn lang(code: &str) -> Lang {
++    Lang::from_code(code).unwrap_or_else(|| panic!("{code} registered"))
++}
++
++fn source(code: &str) -> &'static str {
++    LANGUAGES.iter().find(|i| i.code == code).map_or("", |i| i.source)
++}
++
++/// Run `f` with Hanpan's names on, as an embedded frame does, and turn them off again.
++fn hosted<R>(f: impl FnOnce() -> R) -> R {
++    set_host_names(true);
++    let out = f();
++    set_host_names(false);
++    out
++}
++
++fn names_the_app(s: &str) -> bool {
++    s.contains(APP_NAME)
++}
++
++/// A message source with each `{name}` placeholder filled with `value`.
++fn filled(src: &str, value: &str) -> String {
++    let mut out = String::new();
++    let mut rest = src;
++    while let Some(open) = rest.find('{') {
++        out.push_str(&rest[..open]);
++        match rest[open..].find('}') {
++            Some(close) => {
++                out.push_str(value);
++                rest = &rest[open + close + 1..];
++            }
++            None => {
++                out.push_str(&rest[open..]);
++                rest = "";
++            }
++        }
++    }
++    out.push_str(rest);
++    out
++}
++
++/// Every catalog entry that names the app, in every language Hanpan opens illust in, comes out
++/// without the name: plain, contextual (and `t_name`), command-id, plural, `@msg` and
++/// `@msgplural` entries, and the English source column as the English UI shows it. Only the
++/// About window's own strings keep it.
++#[test]
++fn embedded_text_never_names_the_app_except_about() {
++    let mut checked = 0usize;
++    let mut sources = std::collections::BTreeSet::new();
++    hosted(|| {
++        for code in HANPAN_LANGS {
++            let l = lang(code);
++            set_current(l);
++            for (ctx, src, tr_text) in parse_entries(source(code)).0 {
++                sources.insert((ctx.clone(), src.clone()));
++                if !names_the_app(&tr_text) && !names_the_app(&src) {
++                    continue;
++                }
++                let kept = KEEP_NAME.contains(&src.as_str());
++                let shown: Vec<String> = match ctx.as_str() {
++                    "" => vec![tr(l, &src).to_string()],
++                    "@id" => vec![tr_id(l, &src, "x").to_string()],
++                    "@plural" => {
++                        let (one, other) = src.split_once('|').expect("one|other");
++                        [0, 1, 2, 3, 5, 11, 21, 22, 100].iter().map(|n| trn(l, *n, one, other)).collect()
++                    }
++                    "@msg" => vec![message(l, &src), message(l, &filled(&src, "7")), msg(&filled(&src, "x"))],
++                    "@msgplural" => src.split('|').flat_map(|form| [1, 2, 5].map(|n| message(l, &filled(form, &n.to_string())))).collect(),
++                    _ => vec![tr_ctx(l, &ctx, &src).to_string(), t_name(&ctx, &src).to_string()],
++                };
++                for shown in shown {
++                    if kept {
++                        assert_eq!(shown, tr_text, "{code}: the About window keeps the name: {src:?}");
++                    } else {
++                        assert!(!names_the_app(&shown), "{code} {ctx:?} {src:?}: {shown:?}");
++                    }
++                    checked += 1;
++                }
++            }
++        }
++        // The English source column, as the English UI (and any language without the entry) shows it.
++        set_current(Lang::EN);
++        for (ctx, src) in &sources {
++            if !names_the_app(src) {
++                continue;
++            }
++            let shown: Vec<String> = match ctx.as_str() {
++                "" => vec![tr(Lang::EN, src).to_string()],
++                "@id" => continue,
++                "@plural" => {
++                    let (one, other) = src.split_once('|').expect("one|other");
++                    [1, 2].iter().map(|n| trn(Lang::EN, *n, one, other)).collect()
++                }
++                "@msg" => vec![message(Lang::EN, src), message(Lang::EN, &filled(src, "7")), msg(&filled(src, "x"))],
++                "@msgplural" => src.split('|').map(|form| message(Lang::EN, &filled(form, "3"))).collect(),
++                _ => vec![tr_ctx(Lang::EN, ctx, src).to_string()],
++            };
++            for shown in shown {
++                if KEEP_NAME.contains(&src.as_str()) {
++                    assert_eq!(&shown, src);
++                } else {
++                    assert!(!names_the_app(&shown), "en {ctx:?} {src:?}: {shown:?}");
++                }
++                checked += 1;
++            }
++        }
++        // The engine's own messages that name the app and have no catalog row.
++        for code in HANPAN_LANGS {
++            set_current(lang(code));
++            for src in ENGINE_MESSAGES {
++                for shown in [message(lang(code), src), message(lang(code), &filled(src, "7"))] {
++                    assert!(!names_the_app(&shown), "{code} engine {src:?}: {shown:?}");
++                    checked += 1;
++                }
++            }
++        }
++        set_current(Lang::EN);
++    });
++    assert!(checked > 14 * 40 * 2, "only {checked} texts name the app: the catalogs moved?");
++}
++
++/// Korean reads 일러스트 with the particles the catalogs already put after the name (가, 를, 는,
++/// 에서, 의 suit a final vowel), and other languages read "AI Illustration".
++#[test]
++fn hanpan_names_read_naturally() {
++    let ko = lang("ko");
++    hosted(|| {
++        assert_eq!(tr(ko, "Quit VectorCraft"), "AI 일러스트 종료");
++        assert_eq!(tr(ko, "Applies the next time VectorCraft starts."), "다음에 AI 일러스트를 시작할 때 적용됩니다.");
++        assert_eq!(tr(ko, "VectorCraft read this script without running it."), "AI 일러스트가 이 스크립트를 실행하지 않고 읽었습니다.");
++        assert_eq!(tr(ko, "In VectorCraft"), "AI 일러스트에서");
++        assert_eq!(message(ko, "VectorCraft doesn't search other apps' or the system's folders: /x"), "AI 일러스트는 다른 앱이나 시스템의 폴더를 검색하지 않습니다: /x");
++        assert_eq!(tr_ctx(ko, "file-filter", "VectorCraft Template"), "AI 일러스트 템플릿");
++        assert_eq!(tr(Lang::EN, "Quit VectorCraft"), "Quit AI Illustration");
++        assert_eq!(tr(lang("fr"), "Quit VectorCraft"), "Quitter AI Illustration");
++        assert_eq!(message(Lang::EN, "VectorCraft failed to start: no GPU"), "AI Illustration failed to start: no GPU");
++        // A case ending stuck to the name goes with it: "AI Illustration" is not declined.
++        assert_eq!(rename(lang("cs"), "ve VectorCraftu.").as_ref(), "ve AI Illustration.");
++        // The About window keeps the original name.
++        assert_eq!(tr(ko, "About VectorCraft"), "VectorCraft 정보");
++        assert_eq!(tr_id(ko, "help.about", "About VectorCraft"), "VectorCraft 정보");
++        assert_eq!(tr(Lang::EN, "About VectorCraft"), "About VectorCraft");
++        // Lower-case identifiers (command lines, file names) are not the name shown to people.
++        assert_eq!(rename(Lang::EN, "the desktop app and vectorcraft-cli set it").as_ref(), "the desktop app and vectorcraft-cli set it");
++    });
++}
++
++/// The name in user data a message carries (a file's name or path, a font's) stays: only the
++/// message's own words change.
++#[test]
++fn user_data_in_messages_keeps_its_name() {
++    let ko = lang("ko");
++    hosted(|| {
++        // English has no catalog: the message is split by the English templates all the same.
++        assert_eq!(
++            message(Lang::EN, "Couldn't open VectorCraft Poster.vectorcraft: not a VectorCraft file: format is `VectorCraft`"),
++            "Couldn't open VectorCraft Poster.vectorcraft: not an AI Illustration file: format is `VectorCraft`"
++        );
++        assert_eq!(message(Lang::EN, "`a.svg` belongs to a VectorCraft that is running"), "`a.svg` belongs to an AI Illustration that is running");
++        assert_eq!(
++            message(ko, "Couldn't open VectorCraft Poster.vectorcraft: not a VectorCraft file: format is `VectorCraft`"),
++            "VectorCraft Poster.vectorcraft을(를) 열 수 없습니다: AI 일러스트 파일이 아닙니다: format is `VectorCraft`"
++        );
++        assert_eq!(
++            message(Lang::EN, "VectorCraft doesn't search the Shared or Public folder in Users: /Users/Shared/VectorCraft"),
++            "AI Illustration doesn't search the Shared or Public folder in Users: /Users/Shared/VectorCraft"
++        );
++        // A template the code fills in itself, then translates: only the template is renamed.
++        let typed = fmt(tr(Lang::EN, "The name in the save panel was “{typed}”; VectorCraft added the file type's extension. Replacing the file overwrites its contents."), &[("typed", "VectorCraft")]);
++        assert_eq!(typed, "The name in the save panel was “VectorCraft”; AI Illustration added the file type's extension. Replacing the file overwrites its contents.");
++        let folder = fmt(tr(ko, "VectorCraft copies the fonts to {folder}."), &[("folder", "C:\\VectorCraft\\Fonts")]);
++        assert_eq!(folder, "AI 일러스트가 글꼴을 C:\\VectorCraft\\Fonts에 복사합니다.");
++        // An engine message with no template anywhere: its own words lose the name, a path, a
++        // quoted name or a file name in it does not.
++        assert_eq!(
++            message(Lang::EN, "Lock Workspace is not available in VectorCraft"),
++            "Lock Workspace is not available in AI Illustration"
++        );
++        assert_eq!(
++            message(Lang::EN, "VectorCraft stopped reading /art/VectorCraft/a.svg, `VectorCraft` and VectorCraft.svg"),
++            "AI Illustration stopped reading /art/VectorCraft/a.svg, `VectorCraft` and VectorCraft.svg"
++        );
++        // A name the user gave something is not a catalog row: `t_name` leaves it.
++        set_current(ko);
++        assert_eq!(t_name("swatch", "VectorCraft Green"), "VectorCraft Green");
++        set_current(Lang::EN);
++    });
++}
++
++/// The same text looked up again is the same interned string: no allocation per frame.
++#[test]
++fn renamed_text_is_interned_once() {
++    let ko = lang("ko");
++    hosted(|| {
++        let a = tr(ko, "Quit VectorCraft");
++        let b = tr(ko, "Quit VectorCraft");
++        assert!(std::ptr::eq(a, b), "the second lookup reuses the first string");
++        assert_eq!(tr(Lang::EN, "Quit VectorCraft"), "Quit AI Illustration", "Korean and other languages are interned apart");
++    });
++}
++
++/// Past the interning limit a text still never shows the name: it is cut to a part without it.
++#[test]
++fn past_the_interning_limit_the_name_stays_hidden() {
++    hosted(|| {
++        set_rename_limit(1);
++        assert_eq!(tr(Lang::EN, "Quit VectorCraft"), "Quit AI Illustration");
++        let past = tr(Lang::EN, "Hide VectorCraft");
++        assert!(!names_the_app(past), "{past:?}");
++        assert_eq!(past, "Hide");
++        assert_eq!(tr(Lang::EN, "VectorCraft Help…"), "Help…");
++        assert_eq!(tr(Lang::EN, "VectorCraft"), "");
++        set_rename_limit(MAX_RENAMED);
++    });
++}
++
++/// Outside Hanpan every string keeps the name, exactly as before.
++#[test]
++fn not_embedded_keeps_the_brand() {
++    let ko = lang("ko");
++    assert!(!host_names());
++    assert_eq!(tr(ko, "Quit VectorCraft"), "VectorCraft 종료");
++    assert_eq!(tr(Lang::EN, "Quit VectorCraft"), "Quit VectorCraft");
++    assert_eq!(tr_ctx(lang("de"), "file-filter", "VectorCraft Template"), "VectorCraft-Vorlage");
++    assert_eq!(message(Lang::EN, "VectorCraft failed to start: no GPU"), "VectorCraft failed to start: no GPU");
++    assert_eq!(message(ko, "not a VectorCraft file: x"), "VectorCraft 파일이 아닙니다: x");
++    assert_eq!(msg("Lock Workspace is not available in VectorCraft"), "Lock Workspace is not available in VectorCraft");
++    assert_eq!(rename(Lang::EN, "VectorCraft").as_ref(), "VectorCraft");
++    // `msg` remembers its last answer: switching Hanpan's names on and off does not reuse it.
++    let named = "Lock Workspace is not available in VectorCraft";
++    assert_eq!(hosted(|| msg(named)), "Lock Workspace is not available in AI Illustration");
++    assert_eq!(msg(named), named);
++}
++
++/// The Home screen's title inside Hanpan, in the languages Hanpan opens illust in.
++#[test]
++fn home_title_is_translated() {
++    const TITLE: &str = "Create a new drawing or open a file.";
++    assert_eq!(tr(lang("ko"), TITLE), "새 그림을 만들거나 파일을 여세요.");
++    assert_eq!(tr(lang("vi"), TITLE), "Tạo bản vẽ mới hoặc mở một tệp.");
++    for code in HANPAN_LANGS.iter().filter(|c| **c != "en") {
++        assert!(has(lang(code), TITLE), "{code}");
++    }
++}
++
++/// Fix round 1: the app's own built-in names shown as they are (a preset, a colour profile, a
++/// format such as the Links panel's "VectorCraft") read without the name inside Hanpan only.
++#[test]
++fn builtin_names_read_without_the_name_inside_hanpan_only() {
++    let ko = lang("ko");
++    assert_eq!(builtin_shown(Lang::EN, "VectorCraft"), "VectorCraft");
++    assert_eq!(builtin_shown(ko, "VectorCraft Default"), "VectorCraft Default", "outside Hanpan exactly as before");
++    assert!(!hosted_builtin_profile(vectorcraft_color::cms::GENERIC_CMYK));
++    hosted(|| {
++        assert_eq!(builtin_shown(Lang::EN, "VectorCraft"), "AI Illustration");
++        assert_eq!(builtin_shown(Lang::EN, "VectorCraft Default"), "AI Illustration Default");
++        assert!(!names_the_app(builtin_shown(ko, "VectorCraft Default")));
++        assert!(!names_the_app(builtin_shown(ko, vectorcraft_color::cms::GENERIC_CMYK)));
++        assert!(hosted_builtin_profile(vectorcraft_color::cms::GENERIC_CMYK));
++        assert!(!hosted_builtin_profile("My VectorCraft Profile"), "a profile the user added is not built in");
++    });
++}
+diff --git a/crates/ui-egui/src/i18n/id.tsv b/crates/ui-egui/src/i18n/id.tsv
+index 2fd177a29cd9ade5c07b072f82ef26ac35e2d6d3..238047bd6ba46f069d892f7296fd050d69136450 100644
+--- a/crates/ui-egui/src/i18n/id.tsv
++++ b/crates/ui-egui/src/i18n/id.tsv
+@@ -3653,6 +3653,8 @@ effect	Regular	Reguler
+ 	Recent Files	File terkini
+ 	Vector illustration — fast, open, scriptable.	Ilustrasi vektor — cepat, terbuka, mendukung skrip.
+ 	Welcome to VectorCraft	Selamat datang di VectorCraft
++# Hanpan: the Home screen's title in embedded mode (no app name)
++	Create a new drawing or open a file.	Buat gambar baru atau buka file.
+ 	Source code on GitHub	Kode sumber di GitHub
+ 	All Tools	Semua alat
+ 	Draw	Menggambar
+diff --git a/crates/ui-egui/src/i18n/it.tsv b/crates/ui-egui/src/i18n/it.tsv
+index 0c1f053be6014b260e65609621cbfde9fb582dd5..b8987c53ebd82c5db81c07000688349f56c8bd6c 100644
+--- a/crates/ui-egui/src/i18n/it.tsv
++++ b/crates/ui-egui/src/i18n/it.tsv
+@@ -3724,6 +3724,8 @@ digits	Malayalam	Malayalam
+ 	Weight	Spessore
+ 	Weight:	Spessore:
+ 	Welcome to VectorCraft	Ti diamo il benvenuto in VectorCraft
++# Hanpan: the Home screen's title in embedded mode (no app name)
++	Create a new drawing or open a file.	Crea un nuovo disegno o apri un file.
+ 	When pasting text	Quando incolli testo
+ 	White	Bianco
+ 	Widget Position:	Posizione widget:
+diff --git a/crates/ui-egui/src/i18n/ja.tsv b/crates/ui-egui/src/i18n/ja.tsv
+index d776181e2794d63660aad3e38de2cd8125e135c8..0164c074bdc19376c37ca852254fc221a3e01196 100644
+--- a/crates/ui-egui/src/i18n/ja.tsv
++++ b/crates/ui-egui/src/i18n/ja.tsv
+@@ -3319,6 +3319,8 @@ mark-style	Japanese	日本式
+ 	Web Snap:	Web スナップ:
+ 	Weight:	線幅:
+ 	Welcome to VectorCraft	VectorCraft へようこそ
++# Hanpan: the Home screen's title in embedded mode (no app name)
++	Create a new drawing or open a file.	新しいイラストを作成するか、ファイルを開いてください。
+ 	When pasting text	テキストをペーストするとき
+ 	White	白
+ 	Widget Position:	ウィジェットの位置:
+diff --git a/crates/ui-egui/src/i18n/ko.tsv b/crates/ui-egui/src/i18n/ko.tsv
+index 70a73ad6caa1749987730e84429ff2bee82ee707..a93b18365b285756ca2e7684914f4612783ae7fa 100644
+--- a/crates/ui-egui/src/i18n/ko.tsv
++++ b/crates/ui-egui/src/i18n/ko.tsv
+@@ -3309,6 +3309,8 @@ mark-style	Japanese	일본식
+ 	Web Snap:	웹 스냅:
+ 	Weight:	두께:
+ 	Welcome to VectorCraft	VectorCraft에 오신 것을 환영합니다
++# Hanpan: the Home screen's title in embedded mode (no app name)
++	Create a new drawing or open a file.	새 그림을 만들거나 파일을 여세요.
+ 	When pasting text	텍스트를 붙여넣을 때
+ 	White	흰색
+ 	Widget Position:	위젯 위치:
+diff --git a/crates/ui-egui/src/i18n/nl.tsv b/crates/ui-egui/src/i18n/nl.tsv
+index d4f68afa4c0eb2688b41f57755fd317bdf48d9fd..77d0604433e30abfbf020be65225a3d7093ef307 100644
+--- a/crates/ui-egui/src/i18n/nl.tsv
++++ b/crates/ui-egui/src/i18n/nl.tsv
+@@ -3667,6 +3667,8 @@ effect	Regular	Regelmatig
+ 	Recent Files	Recente bestanden
+ 	Vector illustration — fast, open, scriptable.	Vectorillustratie — snel, open, scriptbaar.
+ 	Welcome to VectorCraft	Welkom bij VectorCraft
++# Hanpan: the Home screen's title in embedded mode (no app name)
++	Create a new drawing or open a file.	Maak een nieuwe tekening of open een bestand.
+ 	Source code on GitHub	Broncode op GitHub
+ 	All Tools	Alle gereedschappen
+ 	Draw	Tekenen
+diff --git a/crates/ui-egui/src/i18n/pl.tsv b/crates/ui-egui/src/i18n/pl.tsv
+index 428f6d70e4f2c6e493180fd04daccf1ddeb4bd59..befa4a21cc1cf3699f3a732c3b85b5bdb23dc0d9 100644
+--- a/crates/ui-egui/src/i18n/pl.tsv
++++ b/crates/ui-egui/src/i18n/pl.tsv
+@@ -3773,6 +3773,8 @@ effect	Regular	Normalny
+ 	Recent Files	Ostatnie pliki
+ 	Vector illustration — fast, open, scriptable.	Ilustracja wektorowa — szybka, otwarta, skryptowalna.
+ 	Welcome to VectorCraft	Witamy w VectorCraft
++# Hanpan: the Home screen's title in embedded mode (no app name)
++	Create a new drawing or open a file.	Utwórz nowy rysunek lub otwórz plik.
+ 	Source code on GitHub	Kod źródłowy w serwisie GitHub
+ 	All Tools	Wszystkie narzędzia
+ 	Draw	Rysuj
+diff --git a/crates/ui-egui/src/i18n/pt-br.tsv b/crates/ui-egui/src/i18n/pt-br.tsv
+index 0e994c20fba437123fb5b8365981ad6c834747ff..3aa529d2ba8cc0e6ac4cf64691865bec5ed916f3 100644
+--- a/crates/ui-egui/src/i18n/pt-br.tsv
++++ b/crates/ui-egui/src/i18n/pt-br.tsv
+@@ -3021,6 +3021,8 @@ digits	Malayalam	Malaiala
+ 	Web Snap:	Web Snap:
+ 	Weight:	Peso:
+ 	Welcome to VectorCraft	Bem-vindo ao VectorCraft
++# Hanpan: the Home screen's title in embedded mode (no app name)
++	Create a new drawing or open a file.	Crie um novo desenho ou abra um arquivo.
+ 	When pasting text	Ao colar texto
+ 	White	Branco
+ 	Widget Position:	Posição do Widget:
+diff --git a/crates/ui-egui/src/i18n/ru.tsv b/crates/ui-egui/src/i18n/ru.tsv
+index 3d72f868a5582c8d9bb1ad6a472a7062a119c750..e7d470eea5457685b5ca834440303a3351aed003 100644
+--- a/crates/ui-egui/src/i18n/ru.tsv
++++ b/crates/ui-egui/src/i18n/ru.tsv
+@@ -3719,6 +3719,8 @@ digits	Malayalam	Малаялам
+ 	Weight	Толщина
+ 	Weight:	Толщина:
+ 	Welcome to VectorCraft	Добро пожаловать в VectorCraft
++# Hanpan: the Home screen's title in embedded mode (no app name)
++	Create a new drawing or open a file.	Создайте новый рисунок или откройте файл.
+ 	When pasting text	При вставке текста
+ 	White	Белый
+ 	Widget Position:	Положение виджета:
+diff --git a/crates/ui-egui/src/i18n/vi.tsv b/crates/ui-egui/src/i18n/vi.tsv
+index 28beeec62cfe62ff6ab5f95b7f5fc9b7a55905e2..f0f2ed9ae7964ae208e0391747688b809746fd05 100644
+--- a/crates/ui-egui/src/i18n/vi.tsv
++++ b/crates/ui-egui/src/i18n/vi.tsv
+@@ -4074,6 +4074,8 @@ mark-style	Japanese	Kiểu Nhật
+ 	Weight	Độ dày
+ 	Weight:	Độ dày:
+ 	Welcome to VectorCraft	Chào mừng đến với VectorCraft
++# Hanpan: the Home screen's title in embedded mode (no app name)
++	Create a new drawing or open a file.	Tạo bản vẽ mới hoặc mở một tệp.
+ 	When pasting text	Khi dán văn bản
+ 	White	Trắng
+ 	White Intensity	Cường độ trắng
+diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
+index e707bc9cbcae4965d9c3671fafa3b6171d42517e..43c6842afb566dde2680ea960d4f9aaccf570150 100644
+--- a/crates/ui-egui/src/lib.rs
++++ b/crates/ui-egui/src/lib.rs
+@@ -95,6 +95,9 @@ use tests::{
+ };
+ #[cfg(test)]
+ mod tests;
++// Hanpan: no product name or mark in the chrome when embedded
++#[cfg(test)]
++mod hanpan_brand_tests;
+ 
+ use std::sync::atomic::{AtomicBool, Ordering};
+ use std::sync::mpsc::{Receiver, Sender};
+diff --git a/crates/ui-egui/src/menus.rs b/crates/ui-egui/src/menus.rs
+index a419204162dd8a90066737247f729172fda57399..35d584643c39bb5cc2f3f07c0ccf733cc7176464 100644
+--- a/crates/ui-egui/src/menus.rs
++++ b/crates/ui-egui/src/menus.rs
+@@ -76,7 +76,7 @@ pub(crate) use run::{normalize_panel, opt_bool};
+ use slots::RECENT_FONT_IDS;
+ pub use state::{checked, enabled, plugin_revision, shortcut_of, shown_state};
+ pub(crate) use submenus::PATH_EFFECTS;
+-pub use tree::{menu_tree, menu_tree_named};
++pub use tree::{HELP_TODO, menu_tree, menu_tree_named};
+ pub use ui_commands::UI_COMMANDS;
+ 
+ /// One row of a menu as it shows now. The in-window menus draw these and the macOS menu bar
+diff --git a/crates/ui-egui/src/menus/entries.rs b/crates/ui-egui/src/menus/entries.rs
+index b793d452a457a2bc93779663a44a5255f0f2bb98..fb91e48928524cabb76af2f2ae25608e70daa5ee 100644
+--- a/crates/ui-egui/src/menus/entries.rs
++++ b/crates/ui-egui/src/menus/entries.rs
+@@ -41,6 +41,8 @@ pub fn entry<'a>(app: &VectorcraftApp, it: &'a Item) -> Option<Entry<'a>> {
+             return None;
+         }
+         Item::Sub(label, children) => Entry::Sub(t(label), children),
++        // Hanpan: no "VectorCraft Help…" inside Hanpan
++        Item::Todo(label, _) if app.services.embedded && *label == super::HELP_TODO => return None,
+         Item::Todo(label, sc) => Entry::Item(Row {
+             command: None,
+             source: label,
+@@ -141,6 +143,8 @@ fn flatten(app: &VectorcraftApp, path: Vec<String>, items: &[Item], out: &mut Ve
+                     shortcut: item_shortcut(id, p).or_else(|| shortcut_of(id)).unwrap_or("").to_string(),
+                 })
+             }
++            // Hanpan: no "VectorCraft Help…" inside Hanpan
++            Item::Todo(l, _) if app.services.embedded && *l == super::HELP_TODO => {}
+             Item::Todo(l, sc) => out.push(MenuEntry {
+                 path: path.clone(),
+                 label: l.to_string(),
+diff --git a/crates/ui-egui/src/menus/tree.rs b/crates/ui-egui/src/menus/tree.rs
+index 22d2464f35356a60cafe5679e9184987ea46ab9a..c4f2039711eed056cf4c2a5f318e7f8f8a54afb0 100644
+--- a/crates/ui-egui/src/menus/tree.rs
++++ b/crates/ui-egui/src/menus/tree.rs
+@@ -2,6 +2,10 @@ use super::slots::{PERSPECTIVE_SLOTS, RECENT_FONT_IDS, RECENT_IDS, SAVED_SELECTI
+ use super::submenus::{INSERT_BREAK, INSERT_SPECIAL, INSERT_WHITESPACE, PATH_EFFECTS, TYPE_SIZES, effect_menu, font_items, insert_items};
+ use super::{Item, Sep, c, cp, json, sub, todo, todos};
+ 
++/// Hanpan: Help › VectorCraft Help…, gone from the menus inside Hanpan (it names the app and
++/// does nothing yet).
++pub const HELP_TODO: &str = "VectorCraft Help…";
++
+ /// The in-window and native menu tree. The in-window bar skips the VectorCraft menu (see
+ /// `menu_bar`); the native Mac bar is composed from the whole tree (see `native_menu`).
+ /// `english_names` is Preferences › Type › Show Font Names in English (the Type → Font labels
+@@ -695,7 +699,7 @@ pub fn menu_tree_named(english_names: bool) -> Vec<(&'static str, Vec<Item>)> {
+                 c("VectorCraft on GitHub", "help.github"),
+                 Sep,
+                 c("Search Commands…", "help.commandPalette"),
+-                todos("VectorCraft Help…", "F1"),
++                todos(HELP_TODO, "F1"),
+                 Sep,
+                 c("Check for Updates…", "help.checkForUpdates"),
+                 c("About VectorCraft", "help.about"),
+diff --git a/crates/ui-egui/src/panels/links.rs b/crates/ui-egui/src/panels/links.rs
+index 9e751cf1f579e8f9b85d6f2e54b037fa5ad8696b..44c7367337e2dca01a8352ec5b5b02a47544eac0 100644
+--- a/crates/ui-egui/src/panels/links.rs
++++ b/crates/ui-egui/src/panels/links.rs
+@@ -490,7 +490,9 @@ fn link_info(ui: &mut Ui, info: Option<&Value>, units: vectorcraft_doc::Unit) {
+     };
+     let row = super::doc_info::row;
+     row(ui, tl!("Name"), i["fileName"].as_str().or(i["name"].as_str()).unwrap_or_default().into());
+-    row(ui, tl!("Format"), i["format"].as_str().unwrap_or_default().into());
++    // Hanpan: the format's name is the app's own (a placed VectorCraft document's reads
++    // "VectorCraft"): in the UI language inside Hanpan
++    row(ui, tl!("Format"), crate::i18n::builtin_shown(crate::i18n::current(), i["format"].as_str().unwrap_or_default()).into());
+     row(ui, tl!("Color Space"), i["colorMode"].as_str().unwrap_or_default().into());
+     if let Some(l) = i["location"].as_str() {
+         row(ui, tl!("Location"), l.into());
+diff --git a/crates/ui-egui/src/panels/separations.rs b/crates/ui-egui/src/panels/separations.rs
+index 38cfa604e231ecab9230940182f091c34dd2f15f..0721fa46889cf4b673d0fa8f9a7da445b9ffb82b 100644
+--- a/crates/ui-egui/src/panels/separations.rs
++++ b/crates/ui-egui/src/panels/separations.rs
+@@ -79,8 +79,10 @@ fn plates_section(app: &mut VectorcraftApp, ui: &mut Ui) {
+ fn profile_dropdown(ui: &mut Ui, id: &str, current: &str, kind: ProfileKind, extra: Option<&str>) -> Option<String> {
+     let names: Vec<String> =
+         extra.map(str::to_string).into_iter().chain(cms::profiles().into_iter().filter(|p| p.kind == kind).map(|p| p.name)).collect();
+-    let refs: Vec<&str> = names.iter().map(|n| super::label_or_name(n, extra == Some(n.as_str()))).collect();
+-    widgets::dropdown_names(ui, id, super::label_or_name(current, extra == Some(current)), &refs, 210.0).and_then(|i| names.get(i).cloned())
++    // Hanpan: inside Hanpan the built-in profiles read in the UI language too (one names the app)
++    let built_in = |n: &str| extra == Some(n) || crate::i18n::hosted_builtin_profile(n);
++    let refs: Vec<&str> = names.iter().map(|n| super::label_or_name(n, built_in(n))).collect();
++    widgets::dropdown_names(ui, id, super::label_or_name(current, built_in(current)), &refs, 210.0).and_then(|i| names.get(i).cloned())
+ }
+ 
+ fn settings_section(app: &mut VectorcraftApp, ui: &mut Ui) {

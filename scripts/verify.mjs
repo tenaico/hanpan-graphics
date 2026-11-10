@@ -5,10 +5,20 @@
 //      crates/, Rust and HTML in apps/ (strings there can reach the app compressed or generated,
 //      where the byte scan of the site cannot see them), reported as file:line
 //   3. every licence path the site's NOTICE / ATTRIBUTION.md / ASSETS.md names is in the site
+//   4. the app's own name (PhotoCraft / 포토크래프트, VectorCraft / 벡터크래프트) in what the
+//      embedded rename cannot reach: the web page apps/<web>/index.html (whole file) and the
+//      Hanpan-owned sources, the files our patches create (`new file mode`, tests left out).
+//      Scope: upstream's own sources name the apps on purpose (standalone keeps its names, and
+//      ~700 / ~1,400 catalog, engine and metadata lines say so); inside Hanpan the translated
+//      strings are renamed at one choke point, which the Rust tests of patches photo/0012 and
+//      illust/0010 check over every catalog Hanpan opens. CI does not re-check those strings.
+//      About, its body and the notices may name the app (ALLOWED in lib/brand.mjs).
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { scanBrand, scanSource, isSourceToScan, isShippedText, CREDIT } from './lib/brand.mjs'
+import { scanBrand, scanSource, isSourceToScan, isShippedText, CREDIT, scanAppName, ALLOWED, newFilesOfPatch } from './lib/brand.mjs'
+import { patchList } from './lib/patches.mjs'
+import { readPins } from './lib/pins.mjs'
 import { missingLicenceRefs } from './lib/licences.mjs'
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url))
@@ -54,5 +64,20 @@ if (!existsSync(join(source, 'apps'))) {
 }
 
 report('licence texts named by NOTICE/ATTRIBUTION.md/ASSETS.md', missingLicenceRefs(site).map((m) => `missing ${m}`))
+
+if (existsSync(join(source, 'apps'))) {
+  const page = `${readPins(join(ROOT, 'pins.json'))[app].webApp}/index.html`
+  const owned = [...new Set(patchList(app).flatMap((f) => newFilesOfPatch(readFileSync(f, 'utf8'))))].filter(isSourceToScan)
+  const files = [page, ...owned]
+  const absent = files.filter((f) => !existsSync(join(source, f)))
+  const nameHits = files
+    .filter((f) => existsSync(join(source, f)))
+    .flatMap((f) => scanAppName(app, f, readFileSync(join(source, f), 'utf8'), ALLOWED[app]))
+  console.log(`[${app}] app name scan covers ${files.length - absent.length} file(s): ${files.filter((f) => !absent.includes(f)).join(', ')}`)
+  report('app name scan (page and Hanpan-owned sources)', [
+    ...absent.map((f) => `missing ${f}`),
+    ...nameHits.map((h) => `${h.file}:${h.line}: ${h.match}`),
+  ])
+}
 
 if (failed) process.exit(1)

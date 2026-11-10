@@ -1,0 +1,663 @@
+diff --git a/apps/vectorcraft-web/src/web.rs b/apps/vectorcraft-web/src/web.rs
+index 01795f9cd12d08a669834a74142eda79dd3bd1e9..949818d32dfa6abc8086202c6e9bca5ef30a9eec 100644
+--- a/apps/vectorcraft-web/src/web.rs
++++ b/apps/vectorcraft-web/src/web.rs
+@@ -143,7 +143,13 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
+                         if let Err(e) = crate::api::install() {
+                             log::error!("vectorcraft-web: couldn't install window.vectorcraft: {}", js_err(e));
+                         }
+-                        VectorcraftApp::new(Session::new(), services).with_control(control_rx)
++                        let mut app = VectorcraftApp::new(Session::new(), services).with_control(control_rx);
++                        // Hanpan: embedded, the first frame is already in the host's theme (`theme=light|dark`)
++                        if app.services.embedded {
++                            let mode = vectorcraft_ui_egui::embedded::HanpanMode::from_query(&query());
++                            vectorcraft_ui_egui::embedded::start_theme(&mut app, ctx, mode);
++                        }
++                        app
+                     }
+                 };
+                 Ok(Box::new(WebShell { app: Some(app), host, canvas: page, loss }))
+diff --git a/crates/ui-egui/src/control.rs b/crates/ui-egui/src/control.rs
+index de7f3052e535d036f155519eeab9213df6a1a13d..aa17802fb0786b1b5979045d9c7d0fd77ab55151 100644
+--- a/crates/ui-egui/src/control.rs
++++ b/crates/ui-egui/src/control.rs
+@@ -31,6 +31,9 @@
+ //!   the host; the document keeps its path. No path → `{dataBase64, format, bytes}` (as headless)
+ //! - `wait: true` on `app.save` and `app.export`: the file is written before the reply, even with
+ //!   Background Save or Background Export on. A `wait` other than true, false or null is refused
++//! - `hanpan.theme {mode: light|dark}` (Hanpan, embedded mode only): switch to the host's light or
++//!   dark Hanpan colour scheme at once; reply `{mode}`. `ui.set {brightness}` is ignored there
++//! - `hanpan.status` (Hanpan, embedded mode only): `{mode, uiFont}`
+ 
+ use std::sync::Arc;
+ use std::sync::atomic::{AtomicU8, Ordering};
+@@ -274,6 +277,10 @@ pub fn handle(app: &mut VectorcraftApp, ctx: &egui::Context, req: &ControlReques
+         "ui.menu.list" => ok(serde_json::to_value(crate::menus::menu_entries(app)).unwrap_or_default()),
+         // Hanpan: the PC's fonts (embedded mode, `crate::local_fonts`)
+         "fonts.local" => wrap(crate::local_fonts::control(p)),
++        // Hanpan: the host's theme and what the tab shows (embedded mode only, `crate::embedded`)
++        "hanpan.theme" => wrap(crate::embedded::set_theme(app, ctx, p)),
++        "hanpan.status" if app.services.embedded => ok(crate::embedded::status(app)),
++        "hanpan.status" => err(format!("hanpan.status is {}", crate::embedded::NOT_EMBEDDED)),
+         "ui.contextMenu.list" => ok(serde_json::to_value(crate::menus::context_entries(app)).unwrap_or_default()),
+         "ui.tool.select" => wrap(app.run("tool.select", json!({"tool": s("tool").unwrap_or("")}))),
+         "ui.tool.list" => ok(serde_json::to_value(vectorcraft_tools::TOOL_GROUPS).unwrap_or_default()),
+@@ -632,7 +639,10 @@ fn set_ui(app: &mut VectorcraftApp, req: &ControlRequest) -> Outcome {
+         return err("no document");
+     }
+     let mut r = Ok(Value::Null);
+-    if let Some(b) = s("brightness") {
++    // Hanpan: inside Hanpan the theme is the host's (`hanpan.theme`): `brightness` is ignored
++    if let Some(b) = s("brightness")
++        && !app.services.embedded
++    {
+         r = app.run("window.brightness", json!({"brightness": b}));
+     }
+     if let Some(pn) = s("panel") {
+diff --git a/crates/ui-egui/src/embedded.rs b/crates/ui-egui/src/embedded.rs
+index 492f39ea29223d86a7cf56dd68f2b0a9d1bfe907..f9676b5997c6222dba62350aefd0c4460d11fd3b 100644
+--- a/crates/ui-egui/src/embedded.rs
++++ b/crates/ui-egui/src/embedded.rs
+@@ -3,7 +3,9 @@
+ //! All are off, and New only makes the first document (from the Home screen). Save, Save As and
+ //! Print from the menus and their keys are the host's: they ask the host page (an event on the
+ //! window, [`host_request`]) and write nothing themselves. Export stays as it is. The page API
+-//! (`app.open`, `app.save`) is not gated: the host drives it.
++//! (`app.open`, `app.save`) is not gated: the host drives it. The theme is the host's too: the
++//! Hanpan colour scheme, light or dark ([`HanpanMode`], `hanpan.theme`), whatever the app's
++//! Brightness, Color Scheme and Accent Color preferences say.
+ 
+ /// Hanpan W3: a command that can't run now, as the status line says it (its name, then the
+ /// engine's reason when it has a translation).
+@@ -69,6 +71,8 @@ pub fn blocks(id: &str, has_document: bool) -> bool {
+         "file.reveal" | "file.recentFiles" | "file.saveCopy" | "file.saveAsTemplate" | "file.export.pdf" | "document.exportForOffice" | "file.revert" | "app.quit"
+         | "help.github" | "help.checkForUpdates" => true,
+         "file.new" | "file.newDialog" | "file.newWithoutDialog" | "file.newFromTemplate" => has_document,
++        // the theme is the host's (`hanpan.theme`): no UI Brightness from menus, keys or palette
++        "window.brightness" => true,
+         id => id.starts_with("file.openRecent"),
+     }
+ }
+@@ -90,6 +94,85 @@ pub fn hides(id: &str) -> bool {
+     blocks(id, false)
+ }
+ 
++/// Hanpan: the host's theme, light or dark (`hanpan.theme {mode}` and the page address's
++/// `theme=light|dark`). Inside Hanpan VectorCraft draws only [`Scheme::Hanpan`] at this mode; its
++/// own Brightness, Color Scheme and Accent Color preferences are kept but not shown.
++///
++/// [`Scheme::Hanpan`]: crate::theme::Scheme::Hanpan
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub enum HanpanMode {
++    #[default]
++    Light,
++    Dark,
++}
++
++impl HanpanMode {
++    pub fn from_name(name: &str) -> Option<Self> {
++        match name {
++            "light" => Some(Self::Light),
++            "dark" => Some(Self::Dark),
++            _ => None,
++        }
++    }
++
++    pub fn name(self) -> &'static str {
++        match self {
++            Self::Light => "light",
++            Self::Dark => "dark",
++        }
++    }
++
++    /// The brightness [`crate::theme::Scheme::Hanpan`] is drawn at.
++    pub fn brightness(self) -> crate::theme::Brightness {
++        match self {
++            Self::Light => crate::theme::Brightness::Light,
++            Self::Dark => crate::theme::Brightness::Dark,
++        }
++    }
++
++    /// The page query's `theme=light|dark` (`location.search`, with or without its `?`); light
++    /// when it is missing or another value.
++    pub fn from_query(query: &str) -> Self {
++        query.trim_start_matches('?').split('&').find_map(|kv| kv.strip_prefix("theme=")).and_then(Self::from_name).unwrap_or_default()
++    }
++}
++
++/// The interface font `hanpan.status` reports (Task 4 makes it the PC's Korean font).
++pub const UI_FONT: &str = "NanumGothic";
++
++/// The error `hanpan.theme` and `hanpan.status` give outside Hanpan.
++pub const NOT_EMBEDDED: &str = "only available in embedded mode (?embedded=hanpan)";
++
++/// The first frame's theme: `mode` from the page address, pushed into `ctx` before anything is
++/// drawn and without touching the saved preferences.
++pub fn start_theme(app: &mut crate::VectorcraftApp, ctx: &egui::Context, mode: HanpanMode) {
++    app.ui.hanpan_mode = mode;
++    crate::prefs_dialog::reapply(app, ctx);
++}
++
++/// `hanpan.theme {mode: "light" | "dark"}`: switch at once (the reply's frame already draws it);
++/// the documents and the saved preferences are left alone. Reply `{mode}`.
++pub fn set_theme(app: &mut crate::VectorcraftApp, ctx: &egui::Context, params: &serde_json::Value) -> Result<serde_json::Value, String> {
++    if !app.services.embedded {
++        return Err(format!("hanpan.theme is {NOT_EMBEDDED}"));
++    }
++    let mode = match params.get("mode") {
++        Some(serde_json::Value::String(name)) => HanpanMode::from_name(name).ok_or_else(|| format!("unknown mode `{name}` (light, dark)"))?,
++        Some(_) => return Err("`mode` must be \"light\" or \"dark\"".into()),
++        None => return Err("missing `mode` (light, dark)".into()),
++    };
++    app.ui.hanpan_mode = mode;
++    crate::prefs_dialog::reapply(app, ctx);
++    ctx.request_repaint();
++    Ok(serde_json::json!({"mode": mode.name()}))
++}
++
++/// `hanpan.status {}`: `{mode, uiFont}`.
++pub fn status(app: &crate::VectorcraftApp) -> serde_json::Value {
++    serde_json::json!({"mode": app.ui.hanpan_mode.name(), "uiFont": UI_FONT})
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -170,3 +253,170 @@ mod tests {
+         set_current(before);
+     }
+ }
++
++/// Hanpan: the Hanpan colour scheme and the `hanpan.theme` / `hanpan.status` page API methods.
++#[cfg(test)]
++mod hanpan_theme_tests {
++    use super::*;
++    use crate::theme::{Brightness, Scheme, Tokens};
++    use serde_json::{Value, json};
++
++    type Look = (bool, egui::Color32, egui::Color32, egui::Color32, egui::Color32, egui::Color32, egui::Color32);
++
++    fn app(embedded: bool) -> crate::VectorcraftApp {
++        crate::VectorcraftApp::new(vectorcraft_engine::Session::new(), crate::Services { embedded, ..Default::default() })
++    }
++
++    fn call(app: &mut crate::VectorcraftApp, ctx: &egui::Context, method: &str, params: Value) -> Value {
++        let (req, _rx) = crate::control::ControlRequest::new(method, params);
++        match crate::control::handle(app, ctx, &req) {
++            crate::control::Outcome::Done(v) => v,
++            _ => panic!("{method}: expected an immediate reply"),
++        }
++    }
++
++    /// The colours that tell the schemes apart.
++    fn look(t: &Tokens) -> Look {
++        (t.dark, t.app_bar, t.panel, t.pasteboard, t.text, t.accent, t.accent_strong)
++    }
++
++    fn hanpan(dark: bool) -> Look {
++        look(&Tokens::hanpan(dark))
++    }
++
++    /// Preferences that ask for Classic at Light brightness: what a standalone app would show.
++    fn prefs_ask_classic_light(app: &mut crate::VectorcraftApp) {
++        app.run("prefs.set", json!({"values": {"uiColorScheme": "classic", "uiBrightness": "light", "uiAccent": "pink"}})).unwrap();
++    }
++
++    #[test]
++    fn the_address_picks_the_starting_mode() {
++        assert_eq!(HanpanMode::from_query("?embedded=hanpan&theme=dark"), HanpanMode::Dark);
++        assert_eq!(HanpanMode::from_query("?theme=light&embedded=hanpan"), HanpanMode::Light);
++        assert_eq!(HanpanMode::from_query("embedded=hanpan&theme=dark"), HanpanMode::Dark);
++        assert_eq!(HanpanMode::from_query("?embedded=hanpan"), HanpanMode::Light);
++        assert_eq!(HanpanMode::from_query("?embedded=hanpan&theme=blue"), HanpanMode::Light);
++        assert_eq!(HanpanMode::from_query("?embedded=hanpan&xtheme=dark"), HanpanMode::Light);
++        assert_eq!(HanpanMode::Light.brightness(), Brightness::Light);
++        assert_eq!(HanpanMode::Dark.brightness(), Brightness::Dark);
++    }
++
++    #[test]
++    fn embedded_forces_the_hanpan_scheme() {
++        for (mode, dark) in [(HanpanMode::Dark, true), (HanpanMode::Light, false)] {
++            let ctx = egui::Context::default();
++            let mut app = app(true);
++            start_theme(&mut app, &ctx, mode);
++            assert_eq!(look(&Tokens::get(&ctx)), hanpan(dark), "{mode:?}: the first frame is already in the Hanpan scheme");
++            prefs_ask_classic_light(&mut app);
++            crate::prefs_dialog::apply_runtime(&mut app, &ctx);
++            assert_eq!(look(&Tokens::get(&ctx)), hanpan(dark), "{mode:?}: after apply_runtime");
++            crate::prefs_dialog::reapply(&mut app, &ctx);
++            assert_eq!(look(&Tokens::get(&ctx)), hanpan(dark), "{mode:?}: after reapply");
++            assert_eq!(ctx.global_style().visuals.window_fill, Tokens::hanpan(dark).panel);
++            // whole frames (the saved preferences included) keep it too
++            for _ in 0..2 {
++                let mut out = ctx.run_ui(egui::RawInput::default(), |ui| app.logic(ui.ctx()));
++                out.textures_delta.clear();
++                assert_eq!(look(&Tokens::get(&ctx)), hanpan(dark), "{mode:?}: after a frame");
++            }
++            assert_eq!(app.session.prefs.ui_color_scheme, "classic", "the saved preferences are left alone");
++        }
++    }
++
++    #[test]
++    fn not_embedded_keeps_the_prefs_scheme() {
++        let ctx = egui::Context::default();
++        let mut app = app(false);
++        prefs_ask_classic_light(&mut app);
++        crate::prefs_dialog::apply_runtime(&mut app, &ctx);
++        assert_eq!(look(&Tokens::get(&ctx)), look(&Tokens::classic(Brightness::Light)));
++        // the brightness command and `ui.set {brightness}` work as before
++        assert!(crate::menus::enabled(&app, "window.brightness"));
++        app.run("window.brightness", json!({"brightness": "dark"})).unwrap();
++        crate::prefs_dialog::apply_runtime(&mut app, &ctx);
++        assert_eq!(look(&Tokens::get(&ctx)), look(&Tokens::classic(Brightness::Dark)));
++        let reply = call(&mut app, &ctx, "ui.set", json!({"brightness": "mediumLight"}));
++        assert_eq!(reply["ok"], true, "{reply}");
++        crate::prefs_dialog::apply_runtime(&mut app, &ctx);
++        assert_eq!(app.ui.brightness, Brightness::MediumLight);
++        assert_eq!(look(&Tokens::get(&ctx)), look(&Tokens::for_scheme(Scheme::Classic, Brightness::MediumLight, Default::default())));
++    }
++
++    #[test]
++    fn hanpan_theme_switches_at_once() {
++        let ctx = egui::Context::default();
++        let mut app = app(true);
++        start_theme(&mut app, &ctx, HanpanMode::Light);
++        let reply = call(&mut app, &ctx, "hanpan.theme", json!({"mode": "dark"}));
++        assert_eq!(reply, json!({"ok": true, "result": {"mode": "dark"}}));
++        assert_eq!(look(&Tokens::get(&ctx)), hanpan(true), "the reply's frame already draws it");
++        crate::prefs_dialog::apply_runtime(&mut app, &ctx);
++        assert_eq!(look(&Tokens::get(&ctx)), hanpan(true), "the next frame keeps it");
++        let status = call(&mut app, &ctx, "hanpan.status", json!({}));
++        assert_eq!(status, json!({"ok": true, "result": {"mode": "dark", "uiFont": "NanumGothic"}}));
++        let reply = call(&mut app, &ctx, "hanpan.theme", json!({"mode": "light"}));
++        assert_eq!(reply["result"]["mode"], "light");
++        assert_eq!(look(&Tokens::get(&ctx)), hanpan(false));
++        assert_eq!(super::status(&app)["mode"], "light");
++    }
++
++    #[test]
++    fn hanpan_theme_refused_when_not_embedded() {
++        let ctx = egui::Context::default();
++        let mut app = app(false);
++        crate::prefs_dialog::apply_runtime(&mut app, &ctx);
++        let before = look(&Tokens::get(&ctx));
++        for (method, params) in [("hanpan.theme", json!({"mode": "dark"})), ("hanpan.status", json!({}))] {
++            let reply = call(&mut app, &ctx, method, params);
++            assert_eq!(reply["ok"], false, "{method}: {reply}");
++            let error = reply["error"].as_str().unwrap_or_default();
++            assert!(error.contains("embedded") && !error.contains("unknown method"), "{reply}");
++        }
++        crate::prefs_dialog::apply_runtime(&mut app, &ctx);
++        assert_eq!(look(&Tokens::get(&ctx)), before);
++    }
++
++    #[test]
++    fn hanpan_theme_rejects_unknown_mode() {
++        let ctx = egui::Context::default();
++        let mut app = app(true);
++        start_theme(&mut app, &ctx, HanpanMode::Light);
++        for params in [json!({"mode": "blue"}), json!({}), json!({"mode": 1}), json!({"mode": "Dark"})] {
++            let reply = call(&mut app, &ctx, "hanpan.theme", params.clone());
++            assert_eq!(reply["ok"], false, "{params}: {reply}");
++            assert_eq!(app.ui.hanpan_mode, HanpanMode::Light, "{params}");
++            assert_eq!(look(&Tokens::get(&ctx)), hanpan(false), "{params}");
++        }
++    }
++
++    /// Hanpan: no menu, key, command, preference or `ui.set` changes the theme inside Hanpan.
++    #[test]
++    fn hanpan_embedded_brightness_paths_leave_the_theme_alone() {
++        let ctx = egui::Context::default();
++        let mut app = app(true);
++        start_theme(&mut app, &ctx, HanpanMode::Dark);
++        let saved = app.session.prefs.ui_brightness.clone();
++        assert!(blocks("window.brightness", false) && blocks("window.brightness", true) && hides("window.brightness"));
++        assert!(!crate::menus::enabled(&app, "window.brightness"));
++        assert_eq!(crate::menus::shown_state(&app, "window.brightness", &json!({"brightness": "light"})), None);
++        crate::menus::invoke(&mut app, "window.brightness", json!({"brightness": "light"}));
++        assert!(app.run("window.brightness", json!({"brightness": "light"})).is_err());
++        // `ui.set {brightness}` is ignored; its other fields still apply
++        let reply = call(&mut app, &ctx, "ui.set", json!({"brightness": "light", "status": "hello"}));
++        assert_eq!(reply["ok"], true, "{reply}");
++        assert_eq!(app.ui.status, "hello");
++        assert_eq!(app.session.prefs.ui_brightness, saved, "the saved brightness is left alone");
++        crate::prefs_dialog::apply_runtime(&mut app, &ctx);
++        assert_eq!(look(&Tokens::get(&ctx)), hanpan(true));
++        // preferences set by any path lose to the host's theme
++        app.run("prefs.set", json!({"values": {"uiBrightness": "light", "uiColorScheme": "classic"}})).unwrap();
++        crate::prefs_dialog::apply_runtime(&mut app, &ctx);
++        assert_eq!(look(&Tokens::get(&ctx)), hanpan(true));
++        crate::prefs_dialog::open(&mut app, Some("User Interface"));
++        app.ui.dialog.as_mut().unwrap().fields.insert("uiBrightness".into(), json!("mediumLight"));
++        crate::prefs_dialog::confirm(&mut app).unwrap();
++        crate::prefs_dialog::apply_runtime(&mut app, &ctx);
++        assert_eq!(look(&Tokens::get(&ctx)), hanpan(true));
++    }
++}
+diff --git a/crates/ui-egui/src/menus/run.rs b/crates/ui-egui/src/menus/run.rs
+index 5ba39f237d5d244d8e547022756633ff31f6f4d2..af61064cb80186e90c3b9867a90998dd4a4ccc4f 100644
+--- a/crates/ui-egui/src/menus/run.rs
++++ b/crates/ui-egui/src/menus/run.rs
+@@ -535,6 +535,8 @@ fn run_ui_part6(app: &mut VectorcraftApp, id: &str, p: &Value) -> Option<Result<
+             }
+             Ok(json!(on))
+         }
++        // Hanpan: inside Hanpan the theme is the host's (`hanpan.theme`)
++        "window.brightness" if app.services.embedded => Err("the theme is set by the host page here (hanpan.theme)".into()),
+         "window.brightness" => match s("brightness").as_deref().and_then(Brightness::parse) {
+             Some(b) => {
+                 app.ui.brightness = b;
+diff --git a/crates/ui-egui/src/prefs_dialog.rs b/crates/ui-egui/src/prefs_dialog.rs
+index b91c149f45e350cba58b218a318830920193da93..bf77889ba335e7972d724aa05c0ebdae66ff196e 100644
+--- a/crates/ui-egui/src/prefs_dialog.rs
++++ b/crates/ui-egui/src/prefs_dialog.rs
+@@ -115,10 +115,17 @@ pub fn apply_runtime(app: &mut VectorcraftApp, ctx: &egui::Context) {
+     {
+         app.ui.brightness = b;
+     }
++    // Hanpan: inside Hanpan the host's light or dark Hanpan scheme wins over the saved Brightness,
++    // Color Scheme and Accent Color (which are kept as they are)
++    let (brightness, accent, scheme) = if app.services.embedded {
++        (app.ui.hanpan_mode.brightness(), Accent::default(), Scheme::Hanpan)
++    } else {
++        (app.ui.brightness, Accent::parse(&p.ui_accent).unwrap_or_default(), Scheme::parse(&p.ui_color_scheme).unwrap_or_default())
++    };
+     let want = Applied {
+-        brightness: app.ui.brightness,
+-        accent: Accent::parse(&p.ui_accent).unwrap_or_default(),
+-        scheme: Scheme::parse(&p.ui_color_scheme).unwrap_or_default(),
++        brightness,
++        accent,
++        scheme,
+         canvas: canvas_color(&p.canvas_color),
+         threads: p.render_threads,
+         tool_tips: p.show_tool_tips,
+@@ -206,7 +213,7 @@ pub fn show(app: &mut VectorcraftApp, ctx: &egui::Context) {
+                 ui.label(egui::RichText::new(tl!(cat)).font(theme::semibold(14.0)).color(t.text_strong));
+                 ui.add_space(8.0);
+                 egui::ScrollArea::vertical().id_salt(("prefs", cat)).max_height(400.0).auto_shrink([false, false]).show(ui, |ui| {
+-                    category_fields(ui, &mut d, cat);
++                    category_fields(ui, &mut d, cat, app.services.embedded);
+                 });
+             });
+         });
+@@ -250,7 +257,7 @@ pub fn show(app: &mut VectorcraftApp, ctx: &egui::Context) {
+     }
+ }
+ 
+-fn category_fields(ui: &mut egui::Ui, d: &mut Dialog, cat: &str) {
++fn category_fields(ui: &mut egui::Ui, d: &mut Dialog, cat: &str, embedded: bool) {
+     let t = Tokens::get(ui.ctx());
+     let mut section = "";
+     let mut first = true;
+@@ -332,6 +339,8 @@ fn category_fields(ui: &mut egui::Ui, d: &mut Dialog, cat: &str) {
+                     }
+                 });
+             }
++            // Hanpan: inside Hanpan the theme is the host's: no Brightness, Color Scheme or Accent Color
++            PrefKind::Choice(_) if embedded && matches!(sp.key, "uiBrightness" | "uiColorScheme" | "uiAccent") => {}
+             // Linux only: the other platforms have a single display server.
+             PrefKind::Choice(_) if sp.key == "linuxDisplayServer" && !cfg!(target_os = "linux") => {}
+             // The Classic colour scheme has its own accent: dimmed while it is chosen.
+diff --git a/crates/ui-egui/src/prefs_dialog/tests.rs b/crates/ui-egui/src/prefs_dialog/tests.rs
+index 80fb23a176d557f9b6851c3623ffc3d0db1c7fa5..1d995596c663038d77eed73b777a59539939d835 100644
+--- a/crates/ui-egui/src/prefs_dialog/tests.rs
++++ b/crates/ui-egui/src/prefs_dialog/tests.rs
+@@ -391,3 +391,20 @@ fn hyphenation_exceptions_dialog_ok_reaches_the_hyphenator() {
+     assert!(vectorcraft_text::hyphen::hyphen_points("typography").is_empty());
+     assert_eq!(vectorcraft_text::hyphen::hyphen_points("happen"), vec![3]);
+ }
++
++/// Hanpan: inside Hanpan the theme is the host's. Preferences › User Interface shows no
++/// Brightness, Color Scheme or Accent Color; Canvas Color and the rest stay. Standalone keeps all.
++#[test]
++fn hanpan_embedded_hides_the_theme_rows() {
++    let rows = ["Brightness:", "Color Scheme:", "Accent Color:"];
++    for embedded in [false, true] {
++        let mut a = VectorcraftApp::new(Session::new(), Services { embedded, ..Default::default() });
++        open(&mut a, Some("User Interface"));
++        let text = crate::tests_labels::painted_text(&mut a, |a, ui| show(a, ui.ctx()));
++        assert!(text.contains("Canvas Color:"), "embedded={embedded}: {text}");
++        for row in rows {
++            let shown = text.lines().any(|l| l.trim() == row);
++            assert_eq!(shown, !embedded, "embedded={embedded}: {row}\n{text}");
++        }
++    }
++}
+diff --git a/crates/ui-egui/src/state.rs b/crates/ui-egui/src/state.rs
+index ccced481392407c23d983563caea76779a1a3442..9d91fd315fd2697d5af3795a8a81d2b0bd5f3555 100644
+--- a/crates/ui-egui/src/state.rs
++++ b/crates/ui-egui/src/state.rs
+@@ -334,6 +334,10 @@ pub struct UiState {
+     #[serde(rename = "language", skip_serializing)]
+     pub legacy_language: Option<String>,
+     pub brightness: Brightness,
++    /// Hanpan: the host's light or dark mode, the scheme embedded mode draws (`crate::embedded`).
++    /// Never saved: the page address and `hanpan.theme` give it.
++    #[serde(skip)]
++    pub hanpan_mode: crate::embedded::HanpanMode,
+     pub dock_tab: DockTab,
+     /// Tab order in the dock's tabbed group when it differs from [`DockTab::ALL`].
+     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+@@ -900,6 +904,7 @@ impl Default for UiState {
+         Self {
+             legacy_language: None,
+             brightness: Brightness::MediumDark,
++            hanpan_mode: Default::default(),
+             dock_tab: DockTab::Properties,
+             dock_tab_order: Vec::new(),
+             dock_collapsed: false,
+diff --git a/crates/ui-egui/src/theme.rs b/crates/ui-egui/src/theme.rs
+index 0ca446b4d145bf4ea7d048dc8a0a14eba3223792..e0728e9a23277ab2f16d2426b03defa62ef24747 100644
+--- a/crates/ui-egui/src/theme.rs
++++ b/crates/ui-egui/src/theme.rs
+@@ -93,6 +93,10 @@ pub enum Scheme {
+     #[default]
+     Modern,
+     Classic,
++    /// Hanpan: the AI Word tab's light or dark chrome with the illust accent, only inside Hanpan
++    /// (`crate::embedded`). Not in [`Scheme::ALL`], so [`Scheme::parse`] and the preferences never
++    /// offer it.
++    Hanpan,
+ }
+ 
+ impl Scheme {
+@@ -101,6 +105,7 @@ impl Scheme {
+         match self {
+             Scheme::Modern => "modern",
+             Scheme::Classic => "classic",
++            Scheme::Hanpan => "hanpan",
+         }
+     }
+     pub fn parse(s: &str) -> Option<Self> {
+@@ -427,6 +432,88 @@ impl Tokens {
+         match scheme {
+             Scheme::Modern => Self::for_brightness(b).with_accent(accent),
+             Scheme::Classic => Self::classic(b),
++            // Hanpan: light or dark only, and its own accent
++            Scheme::Hanpan => Self::hanpan(matches!(b, Brightness::Dark | Brightness::MediumDark)),
++        }
++    }
++
++    /// Hanpan: the scheme VectorCraft wears inside Hanpan (`?embedded=hanpan`), so the AI
++    /// Illustration tab looks like Hanpan's other editors. The colours are the AI Word tab's
++    /// chrome (Hanpan's `packages/ui/src/tokens.css` and the Word editor's styles) with the illust
++    /// accent #3E9150; the canvas's own marks (guides, selection, bleed), the corners and the type
++    /// size are the Light or Dark brightness's.
++    pub fn hanpan(dark: bool) -> Self {
++        let hex = |s: u32| Color32::from_rgb((s >> 16) as u8, (s >> 8) as u8, s as u8);
++        // The illust accent; filled buttons keep it behind their white lettering in both.
++        let accent = hex(0x3e9150);
++        // Selected rows: the accent at alpha 0x26 over the panel.
++        let tint = Color32::from_rgba_unmultiplied(0x3e, 0x91, 0x50, 0x26);
++        if dark {
++            let text_dim = hex(0xa0a0a0);
++            // #3E9150 is 3.9:1 on the dark chrome, under the 4.5:1 accent text (links, the active
++            // tool in a flyout) needs: accent marks and text there are this lighter shade of it,
++            // 4.9:1 or more on every dark surface.
++            let mark = hex(0x49ab5f);
++            Tokens {
++                dark: true,
++                app_bar: hex(0x252525),
++                panel: hex(0x1e1e1e),
++                panel_darker: hex(0x2a2a2a),
++                input: hex(0x2a2a2a),
++                input_border: hex(0x555555),
++                border: hex(0x3a3a3a),
++                divider: hex(0x3a3a3a),
++                text: hex(0xe4e4e4),
++                text_dim,
++                text_disabled: hex(0x6b6b6b),
++                icon: text_dim,
++                hover: hex(0x333333),
++                tool_active: hex(0x444444),
++                accent: mark,
++                accent_strong: accent,
++                row_selected: tint,
++                pasteboard: hex(0x2b2b2b),
++                ruler: hex(0x252525),
++                ruler_tick: text_dim,
++                measure_bg: Color32::from_rgba_unmultiplied(0x1e, 0x1e, 0x1e, 235),
++                button: hex(0x2a2a2a),
++                text_strong: hex(0xe4e4e4),
++                tab_strip: hex(0x252525),
++                button_border: hex(0x3a3a3a),
++                flyout_active: mark,
++                ..Self::for_brightness(Brightness::Dark)
++            }
++        } else {
++            let text_dim = hex(0x606366);
++            Tokens {
++                dark: false,
++                app_bar: hex(0xffffff),
++                panel: hex(0xffffff),
++                panel_darker: hex(0xf6f7f9),
++                input: hex(0xf6f7f9),
++                input_border: hex(0xd9d9d9),
++                border: hex(0xe3e6ea),
++                divider: hex(0xefefef),
++                text: hex(0x242424),
++                text_dim,
++                text_disabled: hex(0x909499),
++                icon: text_dim,
++                hover: hex(0xf5f5f5),
++                tool_active: hex(0xe8eaee),
++                accent,
++                accent_strong: accent,
++                row_selected: tint,
++                pasteboard: hex(0xe6e6e6),
++                ruler: hex(0xf6f7f9),
++                ruler_tick: text_dim,
++                measure_bg: Color32::from_rgba_unmultiplied(0xff, 0xff, 0xff, 235),
++                button: hex(0xffffff),
++                text_strong: hex(0x232425),
++                tab_strip: hex(0xf6f7f9),
++                button_border: hex(0xe3e6ea),
++                flyout_active: accent,
++                ..Self::for_brightness(Brightness::Light)
++            }
+         }
+     }
+ 
+@@ -749,6 +836,100 @@ mod tests {
+         (a.max(b) + 0.05) / (a.min(b) + 0.05)
+     }
+ 
++    /// Hanpan: a `0xrrggbb` value as an opaque colour.
++    fn hex(rgb: u32) -> Color32 {
++        Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
++    }
++
++    /// Hanpan: the two Hanpan schemes are the AI Word tab's chrome (Hanpan spec 5.1) with the
++    /// illust accent #3E9150; what Word has no counterpart for is the Light or Dark brightness's.
++    #[test]
++    fn hanpan_tokens_match_word() {
++        let t = Tokens::hanpan(false);
++        assert!(!t.dark);
++        assert_eq!(t.app_bar, hex(0xffffff));
++        assert_eq!(t.panel, hex(0xffffff));
++        assert_eq!(t.panel_darker, hex(0xf6f7f9));
++        assert_eq!(t.pasteboard, hex(0xe6e6e6));
++        assert_eq!(t.border, hex(0xe3e6ea));
++        assert_eq!(t.divider, hex(0xefefef));
++        assert_eq!(t.text, hex(0x242424));
++        assert_eq!(t.text_dim, hex(0x606366));
++        assert_eq!((t.accent, t.accent_strong), (hex(0x3e9150), hex(0x3e9150)));
++        assert_eq!((t.input, t.input_border), (hex(0xf6f7f9), hex(0xd9d9d9)));
++        assert_eq!((t.button, t.button_border), (hex(0xffffff), hex(0xe3e6ea)));
++        assert_eq!((t.hover, t.tool_active), (hex(0xf5f5f5), hex(0xe8eaee)));
++        assert_eq!((t.text_disabled, t.text_strong), (hex(0x909499), hex(0x232425)));
++        assert_eq!(t.icon, t.text_dim);
++        assert_eq!(t.tab_strip, hex(0xf6f7f9));
++        assert_eq!(t.row_selected, Color32::from_rgba_unmultiplied(0x3e, 0x91, 0x50, 0x26));
++        // the canvas's own marks, corners and type size are the Light brightness's
++        let base = Tokens::for_brightness(Brightness::Light);
++        assert_eq!((t.smart_guide, t.guide, t.selection, t.anchor_selected), (base.smart_guide, base.guide, base.selection, base.anchor_selected));
++        assert_eq!((t.bleed, t.artboard_mark, t.highlight), (base.bleed, base.artboard_mark, base.highlight));
++        assert_eq!((t.radius, t.font_size), (base.radius, base.font_size));
++
++        let t = Tokens::hanpan(true);
++        assert!(t.dark);
++        assert_eq!(t.app_bar, hex(0x252525));
++        assert_eq!(t.panel, hex(0x1e1e1e));
++        assert_eq!(t.panel_darker, hex(0x2a2a2a));
++        assert_eq!(t.pasteboard, hex(0x2b2b2b));
++        assert_eq!((t.border, t.divider), (hex(0x3a3a3a), hex(0x3a3a3a)));
++        assert_eq!(t.text, hex(0xe4e4e4));
++        assert_eq!(t.text_dim, hex(0xa0a0a0));
++        assert_eq!((t.input, t.input_border), (hex(0x2a2a2a), hex(0x555555)));
++        assert_eq!((t.button, t.button_border), (hex(0x2a2a2a), hex(0x3a3a3a)));
++        assert_eq!((t.hover, t.tool_active), (hex(0x333333), hex(0x444444)));
++        assert_eq!((t.text_disabled, t.text_strong), (hex(0x6b6b6b), hex(0xe4e4e4)));
++        assert_eq!(t.icon, t.text_dim);
++        assert_eq!(t.tab_strip, hex(0x252525));
++        // buttons keep the illust accent behind their white lettering
++        assert_eq!(t.accent_strong, hex(0x3e9150));
++        assert_eq!(t.row_selected, Color32::from_rgba_unmultiplied(0x3e, 0x91, 0x50, 0x26));
++        let base = Tokens::for_brightness(Brightness::Dark);
++        assert_eq!((t.smart_guide, t.guide, t.selection, t.anchor_selected), (base.smart_guide, base.guide, base.selection, base.anchor_selected));
++        assert_eq!((t.radius, t.font_size), (base.radius, base.font_size));
++        // the scheme is the same tokens whatever accent the preferences ask for
++        for accent in Accent::ALL {
++            let light = Tokens::for_scheme(Scheme::Hanpan, Brightness::Light, accent);
++            let dark = Tokens::for_scheme(Scheme::Hanpan, Brightness::Dark, accent);
++            assert_eq!((light.panel, light.accent, light.dark), (hex(0xffffff), hex(0x3e9150), false));
++            assert_eq!((dark.panel, dark.accent_strong, dark.dark), (hex(0x1e1e1e), hex(0x3e9150), true));
++        }
++    }
++
++    /// Hanpan: #3E9150 is 3.9:1 on the dark chrome, under the 4.5:1 its text (links, the active
++    /// tool in a flyout) needs, so the dark scheme draws accent marks and text a lighter shade of
++    /// it; filled buttons keep #3E9150 itself.
++    #[test]
++    fn hanpan_accent_reads_on_both_schemes() {
++        for dark in [false, true] {
++            let t = Tokens::hanpan(dark);
++            for surface in [t.app_bar, t.panel, t.panel_darker, t.input, t.pasteboard, t.hover] {
++                assert!(contrast(t.accent, surface) >= 3.0, "dark={dark}: accent on {surface:?} is {:.2}", contrast(t.accent, surface));
++            }
++            assert!(contrast(t.flyout_active, t.panel) >= 3.0, "dark={dark}: the active tool in a flyout");
++            assert!(contrast(Color32::WHITE, t.accent_strong) >= 3.0, "dark={dark}: button lettering");
++            assert!(contrast(t.text, t.panel) >= 4.5 && contrast(t.text_dim, t.panel) >= 4.5, "dark={dark}: text");
++            let gap = (i32::from(t.button_border.r()) - i32::from(t.panel.r())).abs();
++            assert!(gap >= 24, "dark={dark}: slider rail {:?} on panel {:?}", t.button_border, t.panel);
++        }
++        let t = Tokens::hanpan(true);
++        for surface in [t.app_bar, t.panel, t.panel_darker, t.input] {
++            assert!(contrast(t.accent, surface) >= 4.5, "accent text on {surface:?} is {:.2}", contrast(t.accent, surface));
++        }
++    }
++
++    /// Hanpan: only the host page picks the Hanpan scheme; Preferences › Color Scheme neither
++    /// lists nor accepts it.
++    #[test]
++    fn hanpan_scheme_is_not_listed_or_parsed() {
++        assert!(!Scheme::ALL.contains(&Scheme::Hanpan));
++        assert_eq!(Scheme::parse(Scheme::Hanpan.id()), None);
++        assert_eq!(Scheme::parse("hanpan"), None);
++    }
++
+     /// Changing brightness keeps the interface settings made after the theme was applied, such as
+     /// General › Show Tool Tips' delay.
+     #[test]

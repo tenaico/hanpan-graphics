@@ -1,0 +1,675 @@
+diff --git a/apps/photocraft-web/src/api.rs b/apps/photocraft-web/src/api.rs
+index dc759ef91b10544b27ea6a7fa2e8bf9922658b17..80bc52e3edcacee2a0d0f8324775e873867dc85d 100644
+--- a/apps/photocraft-web/src/api.rs
++++ b/apps/photocraft-web/src/api.rs
+@@ -220,10 +220,7 @@ pub fn install() -> Result<(), JsValue> {
+         "readFile",
+         Closure::<dyn Fn(String) -> Result<JsValue, JsValue>>::new(|name: String| {
+             SAVED.with(|s| {
+-                s.borrow()
+-                    .get(&name)
+-                    .map(|b| js_sys::Uint8Array::from(b).into())
+-                    .ok_or_else(|| js_sys::Error::new(&format!("{name}: not found")).into())
++                s.borrow().get(&name).map(|b| js_sys::Uint8Array::from(b).into()).ok_or_else(|| js_sys::Error::new(&format!("{name}: not found")).into())
+             })
+         })
+         .into_js_value(),
+diff --git a/apps/photocraft-web/src/local_fonts.rs b/apps/photocraft-web/src/local_fonts.rs
+index 1682ff902c0a5bd69db580430332ea0783a721e1..a1533a6be3aaf55f07b7a92f3660bd1bd8aa3862 100644
+--- a/apps/photocraft-web/src/local_fonts.rs
++++ b/apps/photocraft-web/src/local_fonts.rs
+@@ -99,9 +99,8 @@ async fn read_ui_face(family: &str) -> Result<(Vec<u8>, Option<Vec<u8>>), String
+     let promise: Promise = query.call1(&window, &options).map_err(js)?.dyn_into().map_err(js)?;
+     let fonts = Array::from(&JsFuture::from(promise).await.map_err(js)?);
+     step("listed");
+-    let named = |name: &str| {
+-        fonts.iter().find(|f| Reflect::get(f, &JsValue::from_str("postscriptName")).ok().and_then(|n| n.as_string()).as_deref() == Some(name))
+-    };
++    let named =
++        |name: &str| fonts.iter().find(|f| Reflect::get(f, &JsValue::from_str("postscriptName")).ok().and_then(|n| n.as_string()).as_deref() == Some(name));
+     let regular = named(regular_name).ok_or_else(|| format!("no {regular_name} on this PC"))?;
+     step("readStart");
+     let regular = bytes_of(&regular).await?;
+@@ -126,11 +125,15 @@ pub fn ui_face_ready() -> bool {
+     UI_ARRIVED.lock().unwrap_or_else(PoisonError::into_inner).is_some()
+ }
+ 
+-/// Hanpan: wait until the interface face has arrived, or `until_ms` (page time) has passed.
++/// Hanpan: wait until the interface face has arrived, or `until_ms` (page time) has passed; at
++/// most the time left now in pauses, so a page clock that does not move cannot hold it forever.
+ pub async fn wait_ui_face(until_ms: f64) {
+     let Some(window) = web_sys::window() else { return };
+-    while !ui_face_ready() && UI_FALLBACK.lock().unwrap_or_else(PoisonError::into_inner).is_none() && now_ms() < until_ms {
+-        let wait = (until_ms - now_ms()).clamp(1.0, 16.0) as i32;
++    let budget = (until_ms - now_ms()).max(0.0);
++    let mut waited = 0.0;
++    while !ui_face_ready() && UI_FALLBACK.lock().unwrap_or_else(PoisonError::into_inner).is_none() {
++        let Some(wait) = local_fonts::ui_face_pause(now_ms(), until_ms, waited, budget) else { break };
++        waited += f64::from(wait);
+         let mut armed = true;
+         let tick = Promise::new(&mut |resolve, _| {
+             armed = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, wait).is_ok();
+@@ -303,7 +306,5 @@ fn fingerprint(bytes: &[u8]) -> u64 {
+ }
+ 
+ fn js(e: JsValue) -> String {
+-    e.as_string()
+-        .or_else(|| Reflect::get(&e, &JsValue::from_str("message")).ok().and_then(|m| m.as_string()))
+-        .unwrap_or_else(|| format!("{e:?}"))
++    e.as_string().or_else(|| Reflect::get(&e, &JsValue::from_str("message")).ok().and_then(|m| m.as_string())).unwrap_or_else(|| format!("{e:?}"))
+ }
+diff --git a/apps/photocraft-web/src/web.rs b/apps/photocraft-web/src/web.rs
+index 8842d7af01d5fcecb3dda351af61bdf5298f6ad0..05b768c860ed11965585ee667e44512c69bd2423 100644
+--- a/apps/photocraft-web/src/web.rs
++++ b/apps/photocraft-web/src/web.rs
+@@ -75,8 +75,11 @@ pub fn start() {
+         if embedded {
+             photocraft_ui_egui::local_fonts::enable();
+             // Hanpan: and draws the interface's Hangul in the PC's own face, as Hanpan's other
+-            // editors do (Latin stays Inter). Read from now, while the presets load
+-            if let Some(face) = crate::local_fonts::pc_ui_face() {
++            // editors do (Latin stays Inter). Read from now, while the presets load; a Korean
++            // interface only (`lang=ko`): others keep the served fonts and do not wait
++            if photocraft_ui_egui::local_fonts::ui_face_wanted(&q)
++                && let Some(face) = crate::local_fonts::pc_ui_face()
++            {
+                 crate::local_fonts::start_ui_face(face);
+                 face_wanted = true;
+             }
+@@ -129,7 +132,11 @@ pub fn start() {
+                     let (session, warnings) = crate::preset_bridge::session(presets.clone());
+                     preset_warnings.extend(warnings);
+                     let drag = listen_drag(&pen_target);
+-                    let services = Services { embedded, host_request: embedded.then(host_request_service), ..services(inbox.clone(), place_inbox.clone(), drag_pos_service(pen_target.clone(), drag)) };
++                    let services = Services {
++                        embedded,
++                        host_request: embedded.then(host_request_service),
++                        ..services(inbox.clone(), place_inbox.clone(), drag_pos_service(pen_target.clone(), drag))
++                    };
+                     let mut app = PhotocraftApp::new(session, services);
+                     // `window.photocraft`: the page's control channel (crate::api).
+                     let (control_tx, control_rx) = std::sync::mpsc::channel();
+diff --git a/crates/ui-egui/src/embedded.rs b/crates/ui-egui/src/embedded.rs
+index f17cac57a4431ecaec79afaffc0a02a65507603f..a15bcb461c082b00f6c5d18be69d5854d35eb887 100644
+--- a/crates/ui-egui/src/embedded.rs
++++ b/crates/ui-egui/src/embedded.rs
+@@ -281,7 +281,10 @@ mod tests {
+         let vi = crate::i18n::Lang::from_code("vi").expect("vi registered");
+         let engine = "command `image.autoTone` is not available right now: the active layer has no pixels";
+         crate::i18n::with_language(ko, || {
+-            assert_eq!(shown_status_line(engine, true), "자동 톤: 지금은 할 수 없습니다. 그림(픽셀)이 있는 레이어를 고르세요. 문자·모양 레이어에는 쓸 수 없습니다.");
++            assert_eq!(
++                shown_status_line(engine, true),
++                "자동 톤: 지금은 할 수 없습니다. 그림(픽셀)이 있는 레이어를 고르세요. 문자·모양 레이어에는 쓸 수 없습니다."
++            );
+             // a reason with no translation is left out, not shown in English
+             assert_eq!(shown_status_line("command `image.autoTone` is not available right now: some new reason", true), "자동 톤: 지금은 할 수 없습니다.");
+             // the engine's other errors, and any error left in English, become one plain sentence
+@@ -417,6 +420,50 @@ mod hanpan_theme_tests {
+         assert_eq!(status_of(&app)["mode"], "light");
+     }
+ 
++    /// Hanpan (final review): the whole app in a Hanpan theme fills its status bar with the AI
++    /// Word tab's status bar colour and draws Word's ribbon edge under the menu bar; a standalone
++    /// theme keeps the chrome fill and no such edge.
++    #[test]
++    fn whole_app_draws_words_status_bar_and_menu_bar_edge() {
++        let hex = |rgb: u32| egui::Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8);
++        let cases = [
++            (Some(HanpanMode::Light), hex(0xf3f4f6), Some(hex(0xd9d9d9))),
++            (Some(HanpanMode::Dark), hex(0x252525), Some(hex(0x555555))),
++            // standalone: whatever theme the preferences pick, filled with its chrome
++            (None, egui::Color32::TRANSPARENT, None),
++        ];
++        for (mode, status_fill, edge) in cases {
++            let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1280.0, 800.0)).with_max_steps(64).build_eframe(move |cc| {
++                crate::PhotocraftApp::setup_context(&cc.egui_ctx, mode.map_or(ThemeKind::Pro, HanpanMode::kind));
++                let mut app = app(mode.is_some());
++                if let Some(mode) = mode {
++                    start_theme(&mut app, &cc.egui_ctx, mode);
++                }
++                app
++            });
++            h.run_steps(4);
++            let t = Tokens::get(&h.ctx);
++            assert_eq!(t.kind.is_hanpan(), mode.is_some());
++            let status_fill = if mode.is_some() { status_fill } else { t.chrome };
++            let rects: Vec<(egui::Rect, egui::Color32)> = h
++                .output()
++                .shapes
++                .iter()
++                .filter_map(|s| match &s.shape {
++                    egui::Shape::Rect(r) => Some((r.rect, r.fill)),
++                    _ => None,
++                })
++                .collect();
++            let full_width = |r: &egui::Rect| r.left() <= 0.0 && r.right() >= 1280.0;
++            assert!(
++                rects.iter().any(|(r, fill)| full_width(r) && r.bottom() >= 800.0 && r.height() > 10.0 && *fill == status_fill),
++                "{mode:?}: no status bar filled {status_fill:?}"
++            );
++            let edges = rects.iter().filter(|(r, fill)| full_width(r) && r.height() <= 1.0 && r.top() < 60.0 && Some(*fill) == edge).count();
++            assert_eq!(edges, usize::from(edge.is_some()), "{mode:?}: the line under the menu bar");
++        }
++    }
++
+     fn status_of(app: &crate::PhotocraftApp) -> Value {
+         status(app, &egui::Context::default())
+     }
+@@ -521,7 +568,9 @@ mod hanpan_theme_tests {
+         let ctx = egui::Context::default();
+         let mut app = app(true);
+         start_theme(&mut app, &ctx, HanpanMode::Dark);
+-        for id in ["window.theme.pro", "window.theme.studioLight", "window.theme.system", "window.theme.toggle", "view.darkenInterface", "view.lightenInterface"] {
++        for id in
++            ["window.theme.pro", "window.theme.studioLight", "window.theme.system", "window.theme.toggle", "view.darkenInterface", "view.lightenInterface"]
++        {
+             assert!(blocks(id, false) && blocks(id, true) && hides(id), "{id}");
+             assert!(crate::menus::invoke(&mut app, &ctx, id, json!({})).is_err(), "{id}");
+             assert!(!crate::menus::is_enabled(&app, id), "{id}");
+diff --git a/crates/ui-egui/src/i18n/host_name_tests.rs b/crates/ui-egui/src/i18n/host_name_tests.rs
+index c3398a28a445651147964afde010a152288fd5c8..08194533161e1268c04b72c0283190f68ba910cf 100644
+--- a/crates/ui-egui/src/i18n/host_name_tests.rs
++++ b/crates/ui-egui/src/i18n/host_name_tests.rs
+@@ -90,13 +90,16 @@ fn embedded_text_never_names_the_app_except_about() {
+ fn hanpan_names_read_naturally() {
+     let ko = lang("ko");
+     hosted(|| {
++        assert_eq!(tr(ko, "{n} commands are not in PhotoCraft."), "명령 {n}개는 AI 포토에 없습니다.");
++        assert_eq!(tr(ko, "PhotoCraft Manages Colors"), "AI 포토에서 색상 관리");
+         assert_eq!(
+-            tr(ko, "{n} commands are not in PhotoCraft."),
+-            "명령 {n}개는 AI 포토에 없습니다."
++            tr(ko, "Nothing to paste: PhotoCraft can't read the system clipboard here"),
++            "붙여넣을 내용 없음: 여기서는 AI 포토가 시스템 클립보드를 읽을 수 없습니다"
++        );
++        assert_eq!(
++            tr(ko, "To drop files, start PhotoCraft under XWayland: `{command}`"),
++            "파일을 끌어다 놓으려면 XWayland에서 AI 포토를 실행하세요: `{command}`"
+         );
+-        assert_eq!(tr(ko, "PhotoCraft Manages Colors"), "AI 포토에서 색상 관리");
+-        assert_eq!(tr(ko, "Nothing to paste: PhotoCraft can't read the system clipboard here"), "붙여넣을 내용 없음: 여기서는 AI 포토가 시스템 클립보드를 읽을 수 없습니다");
+-        assert_eq!(tr(ko, "To drop files, start PhotoCraft under XWayland: `{command}`"), "파일을 끌어다 놓으려면 XWayland에서 AI 포토를 실행하세요: `{command}`");
+         assert_eq!(tr(ko, "PhotoCraft Defaults"), "AI 포토 기본값");
+         assert_eq!(tr(Lang::EN, "PhotoCraft Defaults"), "AI Photo Defaults");
+         assert_eq!(tr(lang("fr"), "{n} commands are not in PhotoCraft."), tr_plain_renamed("fr", "{n} commands are not in PhotoCraft.", "AI Photo"));
+@@ -138,7 +141,10 @@ fn not_embedded_keeps_the_brand() {
+     assert_eq!(tr(ko, "{n} commands are not in PhotoCraft."), "명령 {n}개는 PhotoCraft에 없습니다.");
+     assert_eq!(tr(Lang::EN, "PhotoCraft Defaults"), "PhotoCraft Defaults");
+     assert_eq!(tr_ctx(lang("de"), "smartSvg", "PhotoCraft (internal editor)"), "PhotoCraft (interner Editor)");
+-    assert_eq!(trn(Lang::EN, 2, "{n} step has no PhotoCraft equivalent yet", "{n} steps have no PhotoCraft equivalent yet"), "2 steps have no PhotoCraft equivalent yet");
++    assert_eq!(
++        trn(Lang::EN, 2, "{n} step has no PhotoCraft equivalent yet", "{n} steps have no PhotoCraft equivalent yet"),
++        "2 steps have no PhotoCraft equivalent yet"
++    );
+     assert_eq!(rename(Lang::EN, "PhotoCraft").as_ref(), "PhotoCraft");
+ }
+ 
+diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
+index 9f11c1ca3f4f355602231c56ee79fc217df59d43..db816fd192ba43a372ef1faf83b0048fecba8346 100644
+--- a/crates/ui-egui/src/lib.rs
++++ b/crates/ui-egui/src/lib.rs
+@@ -32,7 +32,6 @@ pub mod dock;
+ // Hanpan: `?embedded=hanpan`, the host page owns the files
+ pub mod embedded;
+ // Hanpan: the PC's fonts in the font menus (embedded web build)
+-pub mod local_fonts;
+ pub mod file_dialog;
+ pub mod file_open;
+ pub mod frame_stages;
+@@ -43,6 +42,7 @@ pub mod icons;
+ pub mod jobs_ui;
+ pub(crate) mod last_brush;
+ pub mod links;
++pub mod local_fonts;
+ pub mod menu_catalog;
+ pub mod menus;
+ pub mod monitor_status;
+diff --git a/crates/ui-egui/src/local_fonts.rs b/crates/ui-egui/src/local_fonts.rs
+index 7a8988cab0847d42324f9be47bb9ab06255348b7..6cb3eaa7f5f993442550aafd4741b47d536d3ced 100644
+--- a/crates/ui-egui/src/local_fonts.rs
++++ b/crates/ui-egui/src/local_fonts.rs
+@@ -51,8 +51,7 @@ struct State {
+     ui_list_only: bool,
+ }
+ 
+-static STATE: Mutex<State> =
+-    Mutex::new(State {
++static STATE: Mutex<State> = Mutex::new(State {
+     enabled: false,
+     listing: Listing::NotAsked,
+     list_requested: false,
+@@ -227,6 +226,30 @@ pub fn ui_face_for_platform(platform: &str) -> Option<&'static str> {
+     }
+ }
+ 
++/// Hanpan (final review): whether the page (`location.search`) wants the interface's Hangul in
++/// the PC's own face: embedded and the interface is Korean (`lang=ko`, which Hanpan's address
++/// always carries and the app's language follows). Other languages keep the served fonts in the
++/// order their script asks for (Japanese and Chinese draw Han in their own face), and do not read
++/// the PC face or wait for it.
++pub fn ui_face_wanted(query: &str) -> bool {
++    crate::embedded::requested(query)
++        && query.trim_start_matches('?').split('&').filter_map(|kv| kv.strip_prefix("lang=")).any(|lang| {
++            let lang = lang.to_ascii_lowercase();
++            lang == "ko" || lang.starts_with("ko-")
++        })
++}
++
++/// Hanpan (final review): the next pause (ms) while the first frame waits for the interface face,
++/// or `None` to stop: once `until_ms` (page time) has passed, or once the pauses so far
++/// (`waited_ms`) add up to `budget_ms`, the cap that ends the wait even when the page clock does
++/// not move (`performance.now()` missing reads 0).
++pub fn ui_face_pause(now_ms: f64, until_ms: f64, waited_ms: f64, budget_ms: f64) -> Option<i32> {
++    if !(now_ms < until_ms && waited_ms < budget_ms) {
++        return None;
++    }
++    Some((until_ms - now_ms).min(budget_ms - waited_ms).clamp(1.0, 16.0) as i32)
++}
++
+ /// Hanpan: the PostScript names of the PC face `family`'s Regular and Bold, so the shell reads
+ /// just those two (`queryLocalFonts({postscriptNames})`) instead of listing every font first.
+ /// Windows' Malgun Gothic files say `MalgunGothic` and `MalgunGothicBold`; a Mac's Apple SD Gothic
+@@ -364,39 +387,214 @@ pub fn filter_families(all: &[String], query: &str, known: &[String], class: Opt
+ const CLASS_WORDS: &[(photocraft_text::FontClass, &[&str])] = {
+     use photocraft_text::FontClass::*;
+     &[
+-        (Monospace, &["mono", "monospace", "courier", "consolas", "code", "coding", "console", "fixedsys", "terminal", "typewriter", "che", "ocr", "menlo", "inconsolata", "코딩"]),
++        (
++            Monospace,
++            &[
++                "mono",
++                "monospace",
++                "courier",
++                "consolas",
++                "code",
++                "coding",
++                "console",
++                "fixedsys",
++                "terminal",
++                "typewriter",
++                "che",
++                "ocr",
++                "menlo",
++                "inconsolata",
++                "코딩",
++            ],
++        ),
+         (Blackletter, &["old english", "fraktur", "blackletter", "textura", "cloister"]),
+-        (Handwritten, &["hand", "handwriting", "handwritten", "comic", "ink free", "print", "pen", "chalk", "marker", "crayon", "kristen", "bradley", "journal", "손글씨"]),
++        (
++            Handwritten,
++            &[
++                "hand",
++                "handwriting",
++                "handwritten",
++                "comic",
++                "ink free",
++                "print",
++                "pen",
++                "chalk",
++                "marker",
++                "crayon",
++                "kristen",
++                "bradley",
++                "journal",
++                "손글씨",
++            ],
++        ),
+         (
+             Script,
+             &[
+-                "script", "brush", "calligraph", "corsiva", "kunstler", "vivaldi", "edwardian", "vladimir", "mistral", "rage", "freestyle", "gigi", "pristina", "blackadder", "harlow", "magneto",
+-                "palace", "parchment", "zapfino", "붓",
++                "script",
++                "brush",
++                "calligraph",
++                "corsiva",
++                "kunstler",
++                "vivaldi",
++                "edwardian",
++                "vladimir",
++                "mistral",
++                "rage",
++                "freestyle",
++                "gigi",
++                "pristina",
++                "blackadder",
++                "harlow",
++                "magneto",
++                "palace",
++                "parchment",
++                "zapfino",
++                "붓",
+             ],
+         ),
+         (
+             Decorative,
+             &[
+-                "algerian", "jokerman", "chiller", "showcard", "stencil", "snap", "ravie", "curlz", "broadway", "bauhaus", "playbill", "wide latin", "colonna", "castellar", "goudy stout", "matura",
+-                "niagara", "onyx", "poster", "tempus", "viner", "juice", "hobo", "forte", "papyrus", "wingdings", "webdings",
++                "algerian",
++                "jokerman",
++                "chiller",
++                "showcard",
++                "stencil",
++                "snap",
++                "ravie",
++                "curlz",
++                "broadway",
++                "bauhaus",
++                "playbill",
++                "wide latin",
++                "colonna",
++                "castellar",
++                "goudy stout",
++                "matura",
++                "niagara",
++                "onyx",
++                "poster",
++                "tempus",
++                "viner",
++                "juice",
++                "hobo",
++                "forte",
++                "papyrus",
++                "wingdings",
++                "webdings",
+             ],
+         ),
+         (SlabSerif, &["slab", "rockwell", "clarendon", "memphis", "archer", "arvo", "zilla", "egyptienne"]),
+         (
+             SansSerif,
+             &[
+-                "sans", "gothic", "grotesk", "grotesque", "arial", "helvetica", "verdana", "tahoma", "segoe", "calibri", "candara", "corbel", "trebuchet", "franklin", "gill", "futura", "malgun",
+-                "gulim", "dotum", "barun", "square", "pretendard", "spoqa", "roboto", "lato", "inter", "bahnschrift", "impact", "meiryo", "yahei", "hei", "dengxian", "leelawadee", "nirmala",
+-                "ebrima", "gadugi", "haettenschweiler", "agency", "eras", "tw cen", "aptos", "selawik", "grandview", "seaford", "tenorite", "avenir", "myriad", "frutiger", "univers", "montserrat",
+-                "poppins", "raleway", "nunito", "arimo", "ubuntu", "고딕", "돋움", "굴림", "산스",
++                "sans",
++                "gothic",
++                "grotesk",
++                "grotesque",
++                "arial",
++                "helvetica",
++                "verdana",
++                "tahoma",
++                "segoe",
++                "calibri",
++                "candara",
++                "corbel",
++                "trebuchet",
++                "franklin",
++                "gill",
++                "futura",
++                "malgun",
++                "gulim",
++                "dotum",
++                "barun",
++                "square",
++                "pretendard",
++                "spoqa",
++                "roboto",
++                "lato",
++                "inter",
++                "bahnschrift",
++                "impact",
++                "meiryo",
++                "yahei",
++                "hei",
++                "dengxian",
++                "leelawadee",
++                "nirmala",
++                "ebrima",
++                "gadugi",
++                "haettenschweiler",
++                "agency",
++                "eras",
++                "tw cen",
++                "aptos",
++                "selawik",
++                "grandview",
++                "seaford",
++                "tenorite",
++                "avenir",
++                "myriad",
++                "frutiger",
++                "univers",
++                "montserrat",
++                "poppins",
++                "raleway",
++                "nunito",
++                "arimo",
++                "ubuntu",
++                "고딕",
++                "돋움",
++                "굴림",
++                "산스",
+             ],
+         ),
+         (
+             Serif,
+             &[
+-                "serif", "times", "georgia", "garamond", "batang", "gungsuh", "myeongjo", "mincho", "song", "songti", "mingliu", "bodoni", "baskerville", "antiqua", "bookman", "cambria", "caslon",
+-                "century", "constantia", "didot", "palatino", "perpetua", "sylfaen", "minion", "goudy", "bell mt", "californian", "centaur", "high tower", "footlight", "elephant", "modern no",
+-                "calisto", "cooper", "bernard", "lora", "merriweather", "playfair", "sitka", "명조", "바탕", "궁서", "세리프",
++                "serif",
++                "times",
++                "georgia",
++                "garamond",
++                "batang",
++                "gungsuh",
++                "myeongjo",
++                "mincho",
++                "song",
++                "songti",
++                "mingliu",
++                "bodoni",
++                "baskerville",
++                "antiqua",
++                "bookman",
++                "cambria",
++                "caslon",
++                "century",
++                "constantia",
++                "didot",
++                "palatino",
++                "perpetua",
++                "sylfaen",
++                "minion",
++                "goudy",
++                "bell mt",
++                "californian",
++                "centaur",
++                "high tower",
++                "footlight",
++                "elephant",
++                "modern no",
++                "calisto",
++                "cooper",
++                "bernard",
++                "lora",
++                "merriweather",
++                "playfair",
++                "sitka",
++                "명조",
++                "바탕",
++                "궁서",
++                "세리프",
+             ],
+         ),
+     ]
+@@ -419,8 +617,8 @@ pub fn guess_class(family: &str) -> Option<photocraft_text::FontClass> {
+         }
+         let prev = i.checked_sub(1).and_then(|p| chars.get(p)).copied();
+         let next = chars.get(i + 1).copied();
+-        let split = c.is_uppercase()
+-            && prev.is_some_and(|p| p.is_lowercase() || p.is_ascii_digit() || (p.is_uppercase() && next.is_some_and(char::is_lowercase)));
++        let split =
++            c.is_uppercase() && prev.is_some_and(|p| p.is_lowercase() || p.is_ascii_digit() || (p.is_uppercase() && next.is_some_and(char::is_lowercase)));
+         if split && !word.is_empty() {
+             words.push(std::mem::take(&mut word));
+         }
+@@ -732,7 +930,13 @@ pub(crate) mod hanpan_ui_font_tests {
+             assert!(pc.is_some() && nanum.is_some() && pc < nanum, "{family:?}: the PC face goes ahead of NanumGothic: {stack:?}");
+             // Latin is still Inter's (JetBrains Mono's in Monospace): the PC face is after them
+             // and after egui's own symbol and emoji faces, so it only draws what NanumGothic drew
+-            let latin = if family == FontFamily::Monospace { "JetBrainsMono" } else if family == FontFamily::Proportional { "Inter" } else { stack[0].as_str() };
++            let latin = if family == FontFamily::Monospace {
++                "JetBrainsMono"
++            } else if family == FontFamily::Proportional {
++                "Inter"
++            } else {
++                stack[0].as_str()
++            };
+             assert!(at(latin) < pc, "{family:?}: {stack:?}");
+             for egui_face in ["Ubuntu-Light", "NotoEmoji-Regular", "emoji-icon-font"] {
+                 assert!(at(egui_face) < pc, "{family:?}: {egui_face} stays ahead: {stack:?}");
+@@ -776,4 +980,39 @@ pub(crate) mod hanpan_ui_font_tests {
+         assert!(!stack(&ctx, FontFamily::Proportional).iter().any(|n| n.starts_with("pc-hangul:")));
+         assert_eq!(crate::theme::ui_hangul_face(&ctx), None);
+     }
++
++    /// Hanpan (final review): the PC face is read only for a Korean interface inside Hanpan.
++    #[test]
++    fn the_pc_face_is_wanted_only_for_a_korean_interface_inside_hanpan() {
++        assert!(ui_face_wanted("?embedded=hanpan&lang=ko&theme=light"));
++        assert!(ui_face_wanted("lang=ko&embedded=hanpan"));
++        assert!(ui_face_wanted("?embedded=hanpan&lang=ko-KR"));
++        for query in
++            ["?embedded=hanpan", "?embedded=hanpan&lang=ja", "?embedded=hanpan&lang=en", "?embedded=hanpan&lang=vi", "?embedded=hanpan&lang=kok", "?lang=ko"]
++        {
++            assert!(!ui_face_wanted(query), "{query}");
++        }
++    }
++
++    /// Hanpan (final review): the wait for the face ends at the deadline, and also when the page
++    /// clock stands still, once the pauses add up to the hold.
++    #[test]
++    fn the_wait_for_the_face_always_ends() {
++        let (mut waited, mut pauses) = (0.0, 0);
++        while let Some(ms) = ui_face_pause(0.0, 1500.0, waited, 1500.0) {
++            assert!((1..=16).contains(&ms));
++            waited += f64::from(ms);
++            pauses += 1;
++            assert!(pauses <= 200, "the wait does not end");
++        }
++        assert!(waited >= 1500.0 && waited < 1516.0, "{waited}");
++        let mut now = 100.0;
++        let mut waited = 0.0;
++        while let Some(ms) = ui_face_pause(now, 1600.0, waited, 1500.0) {
++            now += f64::from(ms) + 3.0;
++            waited += f64::from(ms);
++        }
++        assert!(now >= 1600.0 || waited >= 1500.0);
++        assert_eq!(ui_face_pause(2000.0, 1600.0, 0.0, 1500.0), None, "past the deadline");
++    }
+ }
+diff --git a/crates/ui-egui/src/panels/status_bar.rs b/crates/ui-egui/src/panels/status_bar.rs
+index 725ff6c1d7885cd94384c29d0da6609db6fc284c..2926417dfa3e262af346e7bf762b5cba06b06acf 100644
+--- a/crates/ui-egui/src/panels/status_bar.rs
++++ b/crates/ui-egui/src/panels/status_bar.rs
+@@ -19,7 +19,8 @@ pub fn status_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+     let t = Tokens::get(ui.ctx());
+     egui::Panel::bottom("status_bar")
+         .exact_size(status_bar_heights(&t).0)
+-        .frame(egui::Frame::NONE.fill(t.chrome).inner_margin(egui::Margin::symmetric(10, 0)))
++        // Hanpan: inside Hanpan the bar is the AI Word tab's status bar (`status_bar_fill`)
++        .frame(egui::Frame::NONE.fill(t.status_bar_fill()).inner_margin(egui::Margin::symmetric(10, 0)))
+         .show(ui, |ui| {
+             let control_h = status_bar_heights(&t).1;
+             // Read from the right in a right-to-left UI, with the trailing group at the left.
+diff --git a/crates/ui-egui/src/panels/title_bar.rs b/crates/ui-egui/src/panels/title_bar.rs
+index bd3d44f13d92f0fa37ab58db8d78555013dea0f3..936235d16b469f065a55d1572bab04b92401c8f2 100644
+--- a/crates/ui-egui/src/panels/title_bar.rs
++++ b/crates/ui-egui/src/panels/title_bar.rs
+@@ -21,8 +21,12 @@ pub fn title_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+         10
+     };
+     let right = if caption_right > 0.0 { 0 } else { 10 };
++    // Hanpan: inside Hanpan the line under the menu bar is the AI Word tab's ribbon edge, drawn
++    // below instead of the panel's separator
++    let edge = t.menu_bar_border();
+     let bar = egui::Panel::top("title_bar")
+         .exact_size(crate::titlebar::bar_height(app, ui.ctx(), if t.pro { 32.0 } else { 38.0 }))
++        .show_separator_line(edge.is_none())
+         .frame(egui::Frame::NONE.fill(t.chrome).inner_margin(egui::Margin { left, right, top: 0, bottom: 0 }))
+         .show(ui, |ui| {
+             let full = ui.max_rect();
+@@ -49,7 +53,9 @@ pub fn title_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+             let title = app
+                 .session
+                 .active()
+-                .map(|d| format!("{}{}", if show_name || app.services.embedded { d.doc.name.as_str() } else { app_name }, if d.is_dirty() { "  •" } else { "" }))
++                .map(|d| {
++                    format!("{}{}", if show_name || app.services.embedded { d.doc.name.as_str() } else { app_name }, if d.is_dirty() { "  •" } else { "" })
++                })
+                 .unwrap_or_else(|| app_name.into());
+             // The menus and the far-end controls are laid out first; the title is centred in
+             // whatever room is left between them (`free`, left to right: menus then controls, or
+@@ -151,6 +157,10 @@ pub fn title_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+                 ui.painter().galley(egui::pos2(x, full.center().y - g.size().y / 2.0), g, t.text_dim);
+             }
+         });
++    if let Some(edge) = edge {
++        let r = bar.response.rect;
++        ui.painter().rect_filled(egui::Rect::from_min_max(egui::pos2(r.left(), r.bottom() - 1.0), r.right_bottom()), 0.0, edge);
++    }
+     // A click anywhere on the bar keeps a zoom being typed (zoom_field.rs).
+     crate::zoom_field::set_title_bar_rect(ui.ctx(), bar.response.rect);
+     if custom {
+diff --git a/crates/ui-egui/src/theme/hanpan.rs b/crates/ui-egui/src/theme/hanpan.rs
+index 4b7d25efa54f969a4c5b8b1187b4e8b040107356..b7fdc45fae7e953a2cf4e1b7e67e19a2614a0431 100644
+--- a/crates/ui-egui/src/theme/hanpan.rs
++++ b/crates/ui-egui/src/theme/hanpan.rs
+@@ -92,3 +92,25 @@ pub(super) fn dark() -> Tokens {
+         ..Tokens::for_kind(ThemeKind::Pro)
+     }
+ }
++
++impl Tokens {
++    /// Hanpan: the status bar's fill. In the Hanpan themes it is the AI Word tab's status bar
++    /// (`--docs-statusbar-bg`); every other theme fills it with the chrome, as before.
++    pub fn status_bar_fill(&self) -> Color32 {
++        match self.kind {
++            ThemeKind::HanpanLight => hex(0xf3f4f6),
++            ThemeKind::HanpanDark => hex(0x252525),
++            _ => self.chrome,
++        }
++    }
++
++    /// Hanpan: the line under the menu bar in the Hanpan themes, the AI Word tab's ribbon edge
++    /// (`--border-strong`); `None` keeps the panel's own separator line, as before.
++    pub fn menu_bar_border(&self) -> Option<Color32> {
++        match self.kind {
++            ThemeKind::HanpanLight => Some(hex(0xd9d9d9)),
++            ThemeKind::HanpanDark => Some(hex(0x555555)),
++            _ => None,
++        }
++    }
++}
+diff --git a/crates/ui-egui/src/theme/tests.rs b/crates/ui-egui/src/theme/tests.rs
+index be511d5e8adab37a8ed713bd2c84c1fb560da08e..d81d7beec2352f823215d3c1946ac7e82533ea34 100644
+--- a/crates/ui-egui/src/theme/tests.rs
++++ b/crates/ui-egui/src/theme/tests.rs
+@@ -455,3 +455,21 @@ fn hanpan_themes_are_not_listed_or_named() {
+     }
+     assert!(ThemeKind::ALL.iter().all(|k| !k.is_hanpan()));
+ }
++
++/// Hanpan (final review): the status bar and the line under the menu bar are the AI Word tab's
++/// status bar (`--docs-statusbar-bg`) and ribbon edge (`--border-strong`), in the Hanpan themes
++/// only; every other theme keeps the chrome fill and the panel's own separator.
++#[test]
++fn hanpan_status_bar_and_menu_bar_border_match_word() {
++    let light = Tokens::for_kind(ThemeKind::HanpanLight);
++    assert_eq!(light.status_bar_fill(), hex(0xf3f4f6));
++    assert_eq!(light.menu_bar_border(), Some(hex(0xd9d9d9)));
++    let dark = Tokens::for_kind(ThemeKind::HanpanDark);
++    assert_eq!(dark.status_bar_fill(), hex(0x252525));
++    assert_eq!(dark.menu_bar_border(), Some(hex(0x555555)));
++    for kind in ThemeKind::ALL {
++        let t = Tokens::for_kind(kind);
++        assert_eq!(t.status_bar_fill(), t.chrome, "{kind:?}");
++        assert_eq!(t.menu_bar_border(), None, "{kind:?}");
++    }
++}

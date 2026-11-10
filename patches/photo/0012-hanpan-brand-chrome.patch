@@ -1,0 +1,928 @@
+diff --git a/apps/photocraft-web/index.html b/apps/photocraft-web/index.html
+index d090cf47da5177f8081fbaf9be80a67cdd048445..3fdb713961d3240bef4f8eac3cb2cf540728df70 100644
+--- a/apps/photocraft-web/index.html
++++ b/apps/photocraft-web/index.html
+@@ -3,13 +3,14 @@
+ <head>
+   <meta charset="utf-8">
+   <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+-  <title>PhotoCraft</title>
++  <title>Image editor</title>
+   <link data-trunk rel="rust" data-bin="photocraft-web" data-cargo-profile="wasm-release" data-cargo-features="heif" data-wasm-opt="z" data-wasm-opt-params="--converge" data-weak-refs />
+   <style>
+-    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #262626; }
++    html { background: #262626; }
++    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; }
+     #photocraft_canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+     #photocraft_loading { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+-      padding: 0 16px; text-align: center; color: #b8b8b8; font: 14px system-ui, sans-serif; pointer-events: none; }
++      padding: 0 16px; text-align: center; color: var(--loading-text, #b8b8b8); font: 14px system-ui, sans-serif; pointer-events: none; }
+     #photocraft_loading p { margin: 0 0 8px; max-width: 420px; line-height: 1.5; }
+     #photocraft_loading a { color: #e0e0e0; pointer-events: auto; }
+     /* The app removes this element once it runs. If the WebAssembly never downloads or doesn't match
+@@ -17,12 +18,24 @@
+     #photocraft_stalled { color: #8c8c8c; visibility: hidden; animation: photocraft-stalled 0s 20s forwards; }
+     @keyframes photocraft-stalled { to { visibility: visible; } }
+   </style>
++  <script>
++    // Hanpan: inside Hanpan (`embedded=hanpan`) the page is the host theme's pasteboard grey from
++    // the first paint (`theme=light|dark`, light when missing), so no dark page flashes first.
++    (function () {
++      var q = new URLSearchParams(location.search);
++      if (q.get('embedded') !== 'hanpan') return;
++      var dark = q.get('theme') === 'dark';
++      var s = document.documentElement.style;
++      s.background = dark ? '#2b2b2b' : '#e6e6e6';
++      s.setProperty('--loading-text', dark ? '#a0a0a0' : '#606366');
++    })();
++  </script>
+ </head>
+ <body>
+   <canvas id="photocraft_canvas"></canvas>
+   <div id="photocraft_loading">
+-    <p>Loading PhotoCraft&hellip;</p>
+-    <p id="photocraft_stalled">This is taking longer than usual. If PhotoCraft doesn't start, its files may have failed to
++    <p>Loading&hellip;</p>
++    <p id="photocraft_stalled">This is taking longer than usual. If the editor doesn't start, its files may have failed to
+       download or come from a different version of this page. <a href="">Reload</a> to try again; the browser
+       console lists what failed.</p>
+   </div>
+diff --git a/apps/photocraft-web/src/web.rs b/apps/photocraft-web/src/web.rs
+index af10c1ab1d87bcf38448c6fdc996f2df1a339947..81623e248d4c6c2ec9298e6381a30dd1f854de7b 100644
+--- a/apps/photocraft-web/src/web.rs
++++ b/apps/photocraft-web/src/web.rs
+@@ -55,12 +55,12 @@ pub fn start() {
+     wasm_bindgen_futures::spawn_local(async {
+         let Some(document) = web_sys::window().and_then(|w| w.document()) else {
+             log::error!("no document");
+-            crate::api::fail("PhotoCraft failed to start: no document");
++            crate::api::fail("The editor failed to start: no document");
+             return;
+         };
+         let Some(canvas) = document.get_element_by_id(CANVAS_ID).and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok()) else {
+             log::error!("missing <canvas id=\"{CANVAS_ID}\">");
+-            crate::api::fail(&format!("PhotoCraft failed to start: no <canvas id=\"{CANVAS_ID}\">"));
++            crate::api::fail(&format!("The editor failed to start: no <canvas id=\"{CANVAS_ID}\">"));
+             return;
+         };
+         let q = query();
+@@ -137,12 +137,12 @@ pub fn start() {
+             )
+             .await;
+         if let Err(e) = &result {
+-            crate::api::fail(&format!("PhotoCraft failed to start: {e:?}"));
++            crate::api::fail(&format!("The editor failed to start: {e:?}"));
+         }
+         if let Some(el) = document.get_element_by_id("photocraft_loading") {
+             match result {
+                 Ok(()) => el.remove(),
+-                Err(e) => el.set_inner_html(&format!("<p>PhotoCraft failed to start: {e:?}</p><p>A browser with WebGPU or WebGL2 is required.</p>")),
++                Err(e) => el.set_inner_html(&format!("<p>The editor failed to start: {e:?}</p><p>A browser with WebGPU or WebGL2 is required.</p>")),
+             }
+         }
+     });
+diff --git a/crates/ui-egui/src/app/frame.rs b/crates/ui-egui/src/app/frame.rs
+index 07ea17b7e8103a19c41715ee1b693575ca927160..4a5dc35ec92f2edc7e64219d7b7f8fc414c0e5e4 100644
+--- a/crates/ui-egui/src/app/frame.rs
++++ b/crates/ui-egui/src/app/frame.rs
+@@ -25,6 +25,8 @@ impl PhotocraftApp {
+     pub fn logic_frame(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+         self.cap_frame_rate();
+         i18n::set_current(i18n::Lang::from_pref(&self.session.prefs().interface.language));
++        // Hanpan: embedded mode calls the app by Hanpan's name
++        i18n::set_host_names(self.services.embedded);
+         // Caps Lock state read from the OS once per frame (see `Services::caps_lock`): the canvas
+         // cursor block needs it before the frame renders. `None` (Wayland/web) keeps `false`.
+         self.caps_lock = self.services.caps_lock.as_mut().is_some_and(|f| f());
+@@ -161,6 +163,8 @@ impl PhotocraftApp {
+         self.begin_synthetic_pass(&ctx);
+         self.hover_layer = None;
+         i18n::set_current(i18n::Lang::from_pref(&self.session.prefs().interface.language));
++        // Hanpan: embedded mode calls the app by Hanpan's name
++        i18n::set_host_names(self.services.embedded);
+         // Fonts registered via set_fonts only take effect next frame; named families would panic now.
+         if !self.fonts_ready {
+             // egui consumed this pass's input without PhotoCraft handling it: keep the synthetic
+diff --git a/crates/ui-egui/src/canvas/start_screen.rs b/crates/ui-egui/src/canvas/start_screen.rs
+index c5ab1da322526d0c0642447cbc845edb0f7d5ecd..5dba95bbbc01c3c304250b58c5d1d80f92fe431b 100644
+--- a/crates/ui-egui/src/canvas/start_screen.rs
++++ b/crates/ui-egui/src/canvas/start_screen.rs
+@@ -32,18 +32,20 @@ pub(super) fn start_screen(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+     let card = Rect::from_center_size(area.center(), egui::vec2(card_width, 330.0 + recent_h + stacked_h));
+     ui.scope_builder(egui::UiBuilder::new().max_rect(card), |ui| {
+         ui.vertical_centered(|ui| {
+-            ui.horizontal(|ui| {
+-                let title = ui.painter().layout_no_wrap(tl!("PhotoCraft").into(), crate::theme::semibold(38.0), t.text);
+-                let by_text = if app.services.embedded { "" } else { tl!("open source") };
+-                let by = ui.painter().layout_no_wrap(by_text.into(), egui::FontId::proportional(13.0), t.text_faint);
+-                let total = title.size().x + by.size().x + 10.0;
+-                ui.add_space(((card.width() - total) / 2.0).max(0.0));
+-                let (r, _) = ui.allocate_exact_size(title.size(), Sense::hover());
+-                ui.painter().galley(r.min, title, t.text);
+-                let (r2, _) = ui.allocate_exact_size(egui::vec2(by.size().x + 10.0, r.height()), Sense::hover());
+-                ui.painter().galley(egui::pos2(r2.left() + 10.0, r.bottom() - by.size().y - 8.0), by, t.text_faint);
+-            });
+-            ui.add_space(6.0);
++            // Hanpan: no app name on the start screen inside Hanpan
++            if !app.services.embedded {
++                ui.horizontal(|ui| {
++                    let title = ui.painter().layout_no_wrap(tl!("PhotoCraft").into(), crate::theme::semibold(38.0), t.text);
++                    let by = ui.painter().layout_no_wrap(tl!("open source").into(), egui::FontId::proportional(13.0), t.text_faint);
++                    let total = title.size().x + by.size().x + 10.0;
++                    ui.add_space(((card.width() - total) / 2.0).max(0.0));
++                    let (r, _) = ui.allocate_exact_size(title.size(), Sense::hover());
++                    ui.painter().galley(r.min, title, t.text);
++                    let (r2, _) = ui.allocate_exact_size(egui::vec2(by.size().x + 10.0, r.height()), Sense::hover());
++                    ui.painter().galley(egui::pos2(r2.left() + 10.0, r.bottom() - by.size().y - 8.0), by, t.text_faint);
++                });
++                ui.add_space(6.0);
++            }
+             ui.label(egui::RichText::new(tl!("Create a new document or open an existing file.")).color(t.text_dim).size(14.0));
+             ui.add_space(22.0);
+             let (mut new_clicked, mut open_clicked) = (false, false);
+diff --git a/crates/ui-egui/src/dialogs.rs b/crates/ui-egui/src/dialogs.rs
+index 81a1cfb55e48a6a07d5b84b351b80d7998c42bd8..cf07b41a7fb0e53fa5933871e4f9e48c3839fb40 100644
+--- a/crates/ui-egui/src/dialogs.rs
++++ b/crates/ui-egui/src/dialogs.rs
+@@ -385,7 +385,8 @@ fn dialog_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, d: &Dialog, fields: &
+         DialogKind::Command => outcome = command_body(app, ui, d, fields, id, interactive),
+         DialogKind::LayerStyle => outcome = crate::layer_style::body_with_response(app, ui, fields, interactive),
+         DialogKind::Error => {
+-            ui.label(fields.get("message").and_then(Value::as_str).unwrap_or("Error"));
++            // Hanpan: an engine message naming the app reads Hanpan's name inside Hanpan
++            ui.label(crate::i18n::rename(crate::i18n::current(), fields.get("message").and_then(Value::as_str).unwrap_or("Error")).as_ref());
+         }
+     }
+     outcome
+diff --git a/crates/ui-egui/src/dialogs/new_doc_ui.rs b/crates/ui-egui/src/dialogs/new_doc_ui.rs
+index 5a6f4ddd8cabf5ecfac5db0a28619f4be9d3bede..894869338d3e834877c95c9dfe740b40e73d1d41 100644
+--- a/crates/ui-egui/src/dialogs/new_doc_ui.rs
++++ b/crates/ui-egui/src/dialogs/new_doc_ui.rs
+@@ -202,6 +202,15 @@ fn preset_unit(p: &Preset, f: &Map<String, Value>) -> String {
+     }
+ }
+ 
++/// Hanpan: the default card's English name as shown, without the app's name inside Hanpan (the
++/// preset keeps its name in the dialog's fields and the saved settings).
++fn shown_card_title(title: &'static str, embedded: bool) -> &'static str {
++    if embedded && title == DEFAULT_PRESET { "Default Size" } else { title }
++}
++
++/// The default card's name, the first preset of Recent.
++const DEFAULT_PRESET: &str = "Default PhotoCraft Size";
++
+ /// 한판 W9: 미터법을 쓰는 화면 언어(한국어, 베트남어)인가.
+ fn metric_ui() -> bool {
+     matches!(crate::i18n::current().code(), "ko" | "vi")
+@@ -552,6 +561,8 @@ fn save_preset(app: &mut crate::PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<St
+ /// A recent category click can make egui count the preset double-click as a triple-click.
+ pub fn body(app: &mut crate::PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Value>) -> bool {
+     let t = Tokens::get(ui.ctx());
++    // Hanpan: inside Hanpan the default card has no app name
++    let embedded = app.services.embedded;
+     // Headings and field labels are static, as in Photoshop: no text cursor over them, no
+     // drag-selecting them (#8331). Text fields keep theirs.
+     ui.style_mut().interaction.selectable_labels = false;
+@@ -629,7 +640,7 @@ pub fn body(app: &mut crate::PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<Strin
+                                 ui.painter().rect_stroke(r, t.radius, Stroke::new(1.5, t.accent), StrokeKind::Inside);
+                             }
+                             page_icon(ui, Rect::from_center_size(pos2(r.center().x, r.top() + 34.0), vec2(40.0, 40.0)), w, h, &t);
+-                            let title = card_title(ui.painter(), tl!(c.title()), card.x - 12.0, t.text);
++                            let title = card_title(ui.painter(), tl!(shown_card_title(c.title(), embedded)), card.x - 12.0, t.text);
+                             let elided = title.elided;
+                             ui.painter().galley(pos2(r.center().x, r.top() + 70.0 - title.size().y / 2.0), title, t.text);
+                             let size = c.size_line(&units, f);
+diff --git a/crates/ui-egui/src/embedded.rs b/crates/ui-egui/src/embedded.rs
+index 0017385571b04e87ac4701aeb0b9b00a51673d0f..b0b6b5749b0534e07cc584a37db3c6667111b8f7 100644
+--- a/crates/ui-egui/src/embedded.rs
++++ b/crates/ui-egui/src/embedded.rs
+@@ -68,6 +68,12 @@ pub fn shown_status(status: &str) -> std::borrow::Cow<'_, str> {
+ /// no pixels") becomes the command's name and what to do, in the interface language; an error
+ /// still in English in another language becomes [`FAILED`]. The original goes to the console.
+ pub fn shown_status_line(status: &str, error: bool) -> std::borrow::Cow<'_, str> {
++    // The app's name as Hanpan calls it (`crate::i18n::rename`, as every translated text)
++    crate::i18n::rename_cow(crate::i18n::current(), reworded_status(status, error))
++}
++
++/// [`shown_status_line`] before the app's name is replaced.
++fn reworded_status(status: &str, error: bool) -> std::borrow::Cow<'_, str> {
+     use std::borrow::Cow;
+     if status.ends_with("is not available right now: no active layer") || status == "no active layer" {
+         log_original(status);
+diff --git a/crates/ui-egui/src/file_open.rs b/crates/ui-egui/src/file_open.rs
+index 5303d3173264fa5ca8f30173f1c269bd9f004879..ab9f5730b73069a1d081ff71178ebdf819c80e0f 100644
+--- a/crates/ui-egui/src/file_open.rs
++++ b/crates/ui-egui/src/file_open.rs
+@@ -194,6 +194,8 @@ impl PhotocraftApp {
+         // The command line's files open before the first frame, which otherwise applies the
+         // interface language: their status lines and notices would come out in English.
+         crate::i18n::set_current(crate::i18n::Lang::from_pref(&self.session.prefs().interface.language));
++        // Hanpan: embedded mode calls the app by Hanpan's name
++        crate::i18n::set_host_names(self.services.embedded);
+         let mut paths: Vec<String> = paths.iter().map(|p| absolute(p)).collect();
+         paths.sort_by(|a, b| natural_cmp(a, b));
+         let batch = crate::jobs_ui::begin_batch(self);
+diff --git a/crates/ui-egui/src/hanpan_brand_tests.rs b/crates/ui-egui/src/hanpan_brand_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..9dd8c74bca79d30c46bbb421681a18d0b6f38f89
+--- /dev/null
++++ b/crates/ui-egui/src/hanpan_brand_tests.rs
+@@ -0,0 +1,151 @@
++//! Hanpan: inside Hanpan (`?embedded=hanpan`) the chrome (menu bar, title bar, panels, dialogs,
++//! start screen, status line) shows no PhotoCraft name or mark, except the About window; the
++//! standalone app is unchanged.
++
++use egui::vec2;
++use egui_kittest::Harness;
++use serde_json::{Map, Value, json};
++
++use crate::PhotocraftApp;
++use crate::state::DialogKind;
++
++fn harness(embedded: bool, language: &str) -> Harness<'static, PhotocraftApp> {
++    let language = language.to_string();
++    let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_max_steps(64).build_eframe(move |cc| {
++        PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
++        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services { embedded, ..Default::default() });
++        app.session.edit_prefs(|p| p.interface.language = language.clone());
++        app
++    });
++    h.run_steps(4);
++    h
++}
++
++fn collect(shape: &egui::Shape, out: &mut Vec<String>) {
++    match shape {
++        egui::Shape::Text(t) => out.push(t.galley.text().to_string()),
++        egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| collect(s, out)),
++        _ => {}
++    }
++}
++
++/// Every text painted in the last frame.
++fn texts(h: &Harness<'static, PhotocraftApp>) -> Vec<String> {
++    let mut out = Vec::new();
++    h.output().shapes.iter().for_each(|s| collect(&s.shape, &mut out));
++    out
++}
++
++fn named(texts: &[String]) -> Vec<&String> {
++    texts.iter().filter(|t| t.contains("PhotoCraft")).collect()
++}
++
++fn open_document(h: &mut Harness<'static, PhotocraftApp>) {
++    h.state_mut().run("file.new", json!({"width": 64, "height": 64})).unwrap();
++    h.state_mut().sync_views();
++    h.run_steps(4);
++}
++
++fn open_dialog(h: &mut Harness<'static, PhotocraftApp>, kind: DialogKind, fields: Map<String, Value>) {
++    h.state_mut().ui.open_dialog(kind, fields);
++    h.run_steps(4);
++}
++
++#[test]
++fn embedded_start_screen_and_title_bar_have_no_name_or_mark() {
++    // Latin languages: the test machine may have no CJK face (Korean is checked without drawing).
++    for language in ["fr", "en"] {
++        let mut h = harness(true, language);
++        let shown = texts(&h);
++        assert!(named(&shown).is_empty(), "{language}: start screen and chrome: {:?}", named(&shown));
++        assert!(crate::brand::mark_rect(&h.ctx).is_none(), "{language}: no brand mark");
++        let subtitle = crate::i18n::tr(crate::i18n::Lang::from_code(language).unwrap(), "Create a new document or open an existing file.");
++        assert!(shown.iter().any(|t| t == subtitle), "{language}: the start screen still speaks: {shown:?}");
++        assert_eq!(crate::panels::window_title(h.state()), "", "{language}: no document, no title");
++        open_document(&mut h);
++        let name = h.state().session.active().map(|d| d.doc.name.clone()).unwrap_or_default();
++        let shown = texts(&h);
++        assert!(named(&shown).is_empty(), "{language}: with a document: {:?}", named(&shown));
++        assert!(shown.iter().any(|t| t.starts_with(&name)), "{language}: the title bar names the document {name:?}: {shown:?}");
++        assert_eq!(crate::panels::window_title(h.state()), name);
++        assert!(crate::brand::mark_rect(&h.ctx).is_none(), "{language}: still no brand mark");
++    }
++}
++
++#[test]
++fn embedded_new_document_card_reads_default_size() {
++    for (language, want) in [("en", "Default Size"), ("fr", "Taille par défaut")] {
++        let mut h = harness(true, language);
++        let fields = h.state_mut().new_document_fields();
++        open_dialog(&mut h, DialogKind::NewDocument, fields);
++        let shown = texts(&h);
++        assert!(shown.iter().any(|t| t == want), "{language}: {want:?} in {shown:?}");
++        assert!(named(&shown).is_empty(), "{language}: {:?}", named(&shown));
++    }
++    let ko = crate::i18n::Lang::from_code("ko").unwrap();
++    assert_eq!(crate::i18n::tr(ko, "Default Size"), "기본 크기");
++}
++
++#[test]
++fn embedded_status_line_and_error_dialog_use_hanpans_name() {
++    let mut h = harness(true, "en");
++    open_document(&mut h);
++    let engine = "these smart-object contents are already open in PhotoCraft";
++    h.state_mut().ui.status = engine.into();
++    h.run_steps(2);
++    let shown = texts(&h);
++    assert!(shown.iter().any(|t| t == "these smart-object contents are already open in AI Photo"), "{shown:?}");
++    assert!(named(&shown).is_empty(), "{:?}", named(&shown));
++    assert_eq!(crate::embedded::shown_status(engine), "these smart-object contents are already open in AI Photo");
++    let message = "the file holds no gradients PhotoCraft can use (noise gradients only)";
++    open_dialog(&mut h, DialogKind::Error, json!({"message": message}).as_object().cloned().unwrap_or_default());
++    let shown = texts(&h);
++    assert!(shown.iter().any(|t| t == "the file holds no gradients AI Photo can use (noise gradients only)"), "{shown:?}");
++    assert!(named(&shown).is_empty(), "{:?}", named(&shown));
++}
++
++/// Korean, without drawing (the test machine may have no Hangul face): what the status line shows.
++#[test]
++fn korean_status_line_reads_ai_photo() {
++    let ko = crate::i18n::Lang::from_code("ko").unwrap();
++    crate::i18n::set_host_names(true);
++    crate::i18n::with_language(ko, || {
++        let status = crate::i18n::tr(ko, "Nothing to paste: PhotoCraft can't read the system clipboard here");
++        assert_eq!(crate::embedded::shown_status_line(status, false), "붙여넣을 내용 없음: 여기서는 AI 포토가 시스템 클립보드를 읽을 수 없습니다");
++        let engine = "these smart-object contents are already open in PhotoCraft";
++        assert_eq!(crate::embedded::shown_status_line(engine, false), "these smart-object contents are already open in AI 포토");
++    });
++    crate::i18n::set_host_names(false);
++}
++
++#[test]
++fn embedded_about_window_keeps_the_original_name() {
++    let mut h = harness(true, "en");
++    open_dialog(&mut h, DialogKind::About, Map::new());
++    let shown = texts(&h);
++    for want in ["About PhotoCraft", "PhotoCraft — an open-source, native image editor written in Rust."] {
++        assert!(shown.iter().any(|t| t == want), "{want:?} in {shown:?}");
++    }
++    assert!(shown.iter().any(|t| t.starts_with("Based on PhotoCraft by the ")), "the credit: {shown:?}");
++}
++
++#[test]
++fn not_embedded_keeps_the_brand() {
++    let mut h = harness(false, "en");
++    let shown = texts(&h);
++    assert!(shown.iter().any(|t| t == "PhotoCraft"), "the start screen's title: {shown:?}");
++    assert!(crate::brand::mark_rect(&h.ctx).is_some(), "the brand mark");
++    assert_eq!(crate::panels::window_title(h.state()), "PhotoCraft");
++    let fields = h.state_mut().new_document_fields();
++    open_dialog(&mut h, DialogKind::NewDocument, fields);
++    assert!(texts(&h).iter().any(|t| t == "Default PhotoCraft Size"));
++    h.state_mut().ui.dialogs.clear();
++    open_document(&mut h);
++    let engine = "these smart-object contents are already open in PhotoCraft";
++    h.state_mut().ui.status = engine.into();
++    h.run_steps(2);
++    assert!(texts(&h).iter().any(|t| t == engine));
++    assert_eq!(crate::embedded::shown_status(engine), engine);
++    let name = h.state().session.active().map(|d| d.doc.name.clone()).unwrap_or_default();
++    assert_eq!(crate::panels::window_title(h.state()), format!("{name} \u{2014} PhotoCraft"));
++}
+diff --git a/crates/ui-egui/src/i18n.rs b/crates/ui-egui/src/i18n.rs
+index df38f93d5e20cb899094d3dc2d7c521c11cadc71..0fc4e73556165bee75f52bb6ef02d3373fc583b4 100644
+--- a/crates/ui-egui/src/i18n.rs
++++ b/crates/ui-egui/src/i18n.rs
+@@ -462,17 +462,20 @@ pub fn t(s: &str) -> &str {
+ 
+ /// Translate an English UI string; unknown strings come back unchanged.
+ pub fn tr(lang: Lang, s: &str) -> &str {
+-    lang.catalog().plain(s).unwrap_or(s)
++    // Hanpan: embedded mode calls the app by Hanpan's name
++    hosted(lang, s, lang.catalog().plain(s).unwrap_or(s))
+ }
+ 
+ /// Like [`tr`], for an English string that needs a disambiguating `context`.
+ pub fn tr_ctx<'a>(lang: Lang, context: &str, s: &'a str) -> &'a str {
+-    lang.catalog().contextual(context, s).unwrap_or_else(|| tr(lang, s))
++    // Hanpan: embedded mode calls the app by Hanpan's name
++    lang.catalog().contextual(context, s).map_or_else(|| tr(lang, s), |text| hosted(lang, s, text))
+ }
+ 
+ /// A string keyed by its command id, falling back to the translation of the English `label`.
+ pub fn tr_id<'a>(lang: Lang, id: &str, label: &'a str) -> &'a str {
+-    lang.catalog().id(id).unwrap_or_else(|| tr(lang, label))
++    // Hanpan: embedded mode calls the app by Hanpan's name
++    lang.catalog().id(id).map_or_else(|| tr(lang, label), |text| hosted(lang, id, text))
+ }
+ 
+ /// Fill `{name}` placeholders. Unknown placeholders are left as written.
+@@ -488,7 +491,8 @@ pub fn fmt(template: &str, args: &[(&str, &str)]) -> String {
+ pub fn trn(lang: Lang, n: u64, one: &str, other: &str) -> String {
+     let idx = (lang.0.plural)(n);
+     let text = lang.catalog().plural(one, other, idx).unwrap_or(if n == 1 { one } else { other });
+-    fmt(text, &[("n", &n.to_string())])
++    // Hanpan: embedded mode calls the app by Hanpan's name
++    rename_cow(lang, fmt(text, &[("n", &n.to_string())]).into()).into_owned()
+ }
+ 
+ #[cfg(test)]
+@@ -497,6 +501,9 @@ mod tests;
+ #[cfg(test)]
+ mod live_tests;
+ 
++#[cfg(test)]
++mod host_name_tests;
++
+ /// 엔진이 영어로 짓는 기본 레이어 이름("Background", "Layer 0")을 화면 언어로 보여 준다.
+ /// 문서에 저장되는 이름은 그대로 두고 그릴 때만 바꾼다(PSD 호환, 엔진·자동화 테스트 유지).
+ pub fn default_name(name: &str) -> std::borrow::Cow<'_, str> {
+@@ -509,3 +516,101 @@ pub fn default_name(name: &str) -> std::borrow::Cow<'_, str> {
+         _ => Cow::Borrowed(name),
+     }
+ }
++
++// ----------------------------------------------------------------------------- Hanpan: app name
++
++/// Hanpan: the app's own name, as the UI's English text and the catalogs write it.
++pub const APP_NAME: &str = "PhotoCraft";
++
++/// Hanpan: English sources that keep the original name in embedded mode: the About window's
++/// title (also the Help menu item) and its product line. The credit sentence under them is not
++/// translated and never passes through here.
++pub const KEEP_NAME: &[&str] = &["About PhotoCraft", "PhotoCraft — an open-source, native image editor written in Rust."];
++
++thread_local! {
++    // Hanpan: embedded mode calls the app by Hanpan's name (set per frame, like the language).
++    static HOST_NAMES: Cell<bool> = const { Cell::new(false) };
++}
++
++/// Hanpan: draw this thread's UI text with Hanpan's name for the app (`true` in embedded mode;
++/// the frame sets it from `Services::embedded`, next to the language).
++pub fn set_host_names(on: bool) {
++    HOST_NAMES.set(on);
++}
++
++/// Hanpan: is this thread's UI text drawn with Hanpan's name for the app?
++pub fn host_names() -> bool {
++    HOST_NAMES.get()
++}
++
++/// Hanpan: what Hanpan calls the app in `lang`: "AI 포토" in Korean, "AI Photo" in every other
++/// language (Hanpan's own UI uses the English name outside Korean). The catalogs' Korean particles
++/// after the name (가, 를, 에서, 에, 와) already suit 포토's final vowel.
++pub fn host_app_name(lang: Lang) -> &'static str {
++    if lang.code() == "ko" { "AI 포토" } else { "AI Photo" }
++}
++
++/// Hanpan: `text` in `lang` with [`APP_NAME`] as Hanpan calls the app, when [`host_names`] is on
++/// (otherwise, or without the name, `text` itself). A case ending stuck to the name (Czech
++/// "PhotoCraftu") goes with it: "AI Photo" is not declined. Lower-case identifiers such as
++/// `ai.storyteller.photocraft` are not the name shown to people and stay.
++pub fn rename(lang: Lang, text: &str) -> std::borrow::Cow<'_, str> {
++    if !host_names() || !text.contains(APP_NAME) {
++        return std::borrow::Cow::Borrowed(text);
++    }
++    let name = host_app_name(lang);
++    let mut out = String::with_capacity(text.len());
++    let mut rest = text;
++    while let Some(at) = rest.find(APP_NAME) {
++        out.push_str(&rest[..at]);
++        out.push_str(name);
++        let after = &rest[at + APP_NAME.len()..];
++        rest = after.trim_start_matches(|c: char| c.is_ascii_lowercase());
++    }
++    out.push_str(rest);
++    std::borrow::Cow::Owned(out)
++}
++
++/// Hanpan: [`rename`] for a lookup's result: `source` is the English text (or a command id) it was
++/// looked up by, so the About window's strings ([`KEEP_NAME`]) keep the name. A renamed text is
++/// built once per thread and kept (it is a catalog entry or an English UI string, a bounded set),
++/// so drawing it every frame allocates nothing. Past [`MAX_RENAMED`] texts (none of the bundled
++/// catalogs comes near) a new text is shown as it is, and the console says so once.
++fn hosted<'a>(lang: Lang, source: &str, text: &'a str) -> &'a str {
++    if !host_names() || !text.contains(APP_NAME) || KEEP_NAME.contains(&source) || source == "help.about" {
++        return text;
++    }
++    thread_local! {
++        // [other languages, Korean]: renamed text by the text it was made from
++        static RENAMED: std::cell::RefCell<[std::collections::HashMap<Box<str>, &'static str>; 2]> = Default::default();
++        static FULL_NOTED: Cell<bool> = const { Cell::new(false) };
++    }
++    RENAMED.with(|renamed| -> &'a str {
++        let mut renamed = renamed.borrow_mut();
++        let table = &mut renamed[usize::from(lang.code() == "ko")];
++        if let Some(&done) = table.get(text) {
++            return done;
++        }
++        if table.len() >= MAX_RENAMED {
++            if !FULL_NOTED.replace(true) {
++                log::warn!("hanpan: over {MAX_RENAMED} texts name the app; {text:?} and later ones keep the name");
++            }
++            return text;
++        }
++        let done: &'static str = Box::leak(rename(lang, text).into_owned().into_boxed_str());
++        table.insert(text.into(), done);
++        done
++    })
++}
++
++/// Hanpan: the most renamed texts [`hosted`] keeps per thread and language (the catalogs hold
++/// about 25 per language).
++const MAX_RENAMED: usize = 4096;
++
++/// Hanpan: [`rename`] for text that may already be owned (the status line's).
++pub fn rename_cow(lang: Lang, text: std::borrow::Cow<'_, str>) -> std::borrow::Cow<'_, str> {
++    if !host_names() || !text.contains(APP_NAME) {
++        return text;
++    }
++    std::borrow::Cow::Owned(rename(lang, &text).into_owned())
++}
+diff --git a/crates/ui-egui/src/i18n/ar.tsv b/crates/ui-egui/src/i18n/ar.tsv
+index 80f6d5b078cca900af07aa14ed60251b05cbff41..9f80b571c5742c288e5de94c3729f29bd64e660c 100644
+--- a/crates/ui-egui/src/i18n/ar.tsv
++++ b/crates/ui-egui/src/i18n/ar.tsv
+@@ -1681,6 +1681,8 @@
+ 	Custom Shape Tool	أداة الشكل المخصص
+ 	Cyans	درجات السماوي
+ 	Default PhotoCraft Size	حجم PhotoCraft الافتراضي
++# Hanpan: the new document card in embedded mode (no app name)
++	Default Size	الحجم الافتراضي
+ 	Delete Workspace	حذف مساحة العمل
+ 	Diamond	ماسي
+ 	Dimensions:	الأبعاد:
+diff --git a/crates/ui-egui/src/i18n/cs.tsv b/crates/ui-egui/src/i18n/cs.tsv
+index 28d2aa41d60c266bcb3bb1e506f3746862bff2a7..6f52cdd1d8ae41cce6be970f567064cef9a6711a 100644
+--- a/crates/ui-egui/src/i18n/cs.tsv
++++ b/crates/ui-egui/src/i18n/cs.tsv
+@@ -1797,6 +1797,8 @@
+ 	Custom Shape Tool	Nástroj vlastní tvar
+ 	Cyans	Azurové
+ 	Default PhotoCraft Size	Výchozí velikost PhotoCraft
++# Hanpan: the new document card in embedded mode (no app name)
++	Default Size	Výchozí velikost
+ 	Delete Workspace	Odstranit pracovní prostor
+ 	Diamond	Kosočtverec
+ 	Dimensions:	Rozměry:
+diff --git a/crates/ui-egui/src/i18n/de.tsv b/crates/ui-egui/src/i18n/de.tsv
+index c87e9fbaa0d380a6d3f0b8a6719bf14078e01c4e..61a92733836b754ba47055ed4d45f928086b152f 100644
+--- a/crates/ui-egui/src/i18n/de.tsv
++++ b/crates/ui-egui/src/i18n/de.tsv
+@@ -1756,6 +1756,8 @@
+ 	Custom Shape Tool	Werkzeug für benutzerdefinierte Formen
+ 	Cyans	Cyantöne
+ 	Default PhotoCraft Size	Standard-PhotoCraft-Größe
++# Hanpan: the new document card in embedded mode (no app name)
++	Default Size	Standardgröße
+ 	Delete Workspace	Arbeitsbereich löschen
+ 	Diamond	Raute
+ 	Dimensions:	Abmessungen:
+diff --git a/crates/ui-egui/src/i18n/es.tsv b/crates/ui-egui/src/i18n/es.tsv
+index 3db7201db7e39cacd49d606abf28a27ec171998f..92c67553392c3be5777db498a89adfea9864b1b9 100644
+--- a/crates/ui-egui/src/i18n/es.tsv
++++ b/crates/ui-egui/src/i18n/es.tsv
+@@ -1729,6 +1729,8 @@
+ 	Custom Shape Tool	Herramienta Forma personalizada
+ 	Cyans	Cianes
+ 	Default PhotoCraft Size	Tamaño predeterminado de PhotoCraft
++# Hanpan: the new document card in embedded mode (no app name)
++	Default Size	Tamaño predeterminado
+ 	Delete Workspace	Eliminar espacio de trabajo
+ 	Diamond	Diamante
+ 	Dimensions:	Dimensiones:
+diff --git a/crates/ui-egui/src/i18n/fr.tsv b/crates/ui-egui/src/i18n/fr.tsv
+index 0c73e042be3b86fad88feb56e2a0146f00f12c31..03ddfd8c9f779c5a702fd6f0f36851dd1d7f558b 100644
+--- a/crates/ui-egui/src/i18n/fr.tsv
++++ b/crates/ui-egui/src/i18n/fr.tsv
+@@ -1737,6 +1737,8 @@
+ 	Custom Shape Tool	Outil Forme personnalisée
+ 	Cyans	Cyans
+ 	Default PhotoCraft Size	Taille PhotoCraft par défaut
++# Hanpan: the new document card in embedded mode (no app name)
++	Default Size	Taille par défaut
+ 	Delete Workspace	Supprimer l'espace de travail
+ 	Diamond	Losange
+ 	Dimensions:	Dimensions :
+diff --git a/crates/ui-egui/src/i18n/host_name_tests.rs b/crates/ui-egui/src/i18n/host_name_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..c3398a28a445651147964afde010a152288fd5c8
+--- /dev/null
++++ b/crates/ui-egui/src/i18n/host_name_tests.rs
+@@ -0,0 +1,153 @@
++//! Hanpan: embedded mode calls the app by Hanpan's name for it ("AI 포토" in Korean, "AI Photo"
++//! in every other language) wherever the UI's text names it, except the About window.
++
++use super::catalog::parse_entries;
++use super::*;
++
++/// The languages Hanpan opens the AI Photo tab in.
++const HANPAN_LANGS: [&str; 15] = ["ko", "en", "ja", "fr", "de", "es", "id", "ru", "it", "pl", "cs", "nl", "vi", "pt-br", "ar"];
++
++fn lang(code: &str) -> Lang {
++    Lang::from_code(code).unwrap_or_else(|| panic!("{code} registered"))
++}
++
++/// Run `f` with Hanpan's names on, as an embedded frame does, and turn them off again.
++fn hosted<R>(f: impl FnOnce() -> R) -> R {
++    set_host_names(true);
++    let out = f();
++    set_host_names(false);
++    out
++}
++
++fn names_the_app(s: &str) -> bool {
++    s.contains(APP_NAME)
++}
++
++/// Every catalog entry that names the app, in every language Hanpan opens photo in, comes out
++/// without the name: plain, contextual, command-id and plural entries, and the English source
++/// column as English shows it. Only the About window's own strings keep it.
++#[test]
++fn embedded_text_never_names_the_app_except_about() {
++    let mut checked = 0usize;
++    let mut sources = std::collections::BTreeSet::new();
++    hosted(|| {
++        for code in HANPAN_LANGS {
++            let l = lang(code);
++            let text = LANGUAGES.iter().find(|i| i.code == code).map(LangInfo::text).unwrap_or_default();
++            for (ctx, src, tr_text) in parse_entries(&text).0 {
++                if ctx == "@plural" {
++                    if let Some((one, other)) = src.split_once('|') {
++                        sources.insert(one.to_string());
++                        sources.insert(other.to_string());
++                        if names_the_app(&tr_text) || names_the_app(&src) {
++                            for n in [0, 1, 2, 3, 5, 11, 21, 22, 100] {
++                                let shown = trn(l, n, one, other);
++                                assert!(!names_the_app(&shown), "{code} plural {src:?} n={n}: {shown:?}");
++                                checked += 1;
++                            }
++                        }
++                    }
++                    continue;
++                }
++                sources.insert(src.clone());
++                if !names_the_app(&tr_text) && !names_the_app(&src) {
++                    continue;
++                }
++                let kept = KEEP_NAME.contains(&src.as_str());
++                let shown = match ctx.as_str() {
++                    "" => tr(l, &src).to_string(),
++                    "@id" => tr_id(l, &src, "x").to_string(),
++                    _ => tr_ctx(l, &ctx, &src).to_string(),
++                };
++                if kept {
++                    assert_eq!(shown, tr_text, "{code}: the About window keeps the name: {src:?}");
++                } else {
++                    assert!(!names_the_app(&shown), "{code} {ctx:?} {src:?}: {shown:?}");
++                }
++                checked += 1;
++            }
++        }
++        // The English source column, as the English UI (and any language without the entry) shows it.
++        for src in &sources {
++            if !names_the_app(src) {
++                continue;
++            }
++            let shown = tr(Lang::EN, src);
++            if KEEP_NAME.contains(&src.as_str()) {
++                assert_eq!(shown, src);
++            } else {
++                assert!(!names_the_app(shown), "en {src:?}: {shown:?}");
++            }
++            checked += 1;
++        }
++    });
++    assert!(checked > 15 * 15, "only {checked} entries name the app: the catalogs moved?");
++}
++
++/// Korean reads 포토 with the particles the catalogs already put after the name (가, 를, 에서,
++/// 에, 와 suit a final vowel), and other languages read "AI Photo".
++#[test]
++fn hanpan_names_read_naturally() {
++    let ko = lang("ko");
++    hosted(|| {
++        assert_eq!(
++            tr(ko, "{n} commands are not in PhotoCraft."),
++            "명령 {n}개는 AI 포토에 없습니다."
++        );
++        assert_eq!(tr(ko, "PhotoCraft Manages Colors"), "AI 포토에서 색상 관리");
++        assert_eq!(tr(ko, "Nothing to paste: PhotoCraft can't read the system clipboard here"), "붙여넣을 내용 없음: 여기서는 AI 포토가 시스템 클립보드를 읽을 수 없습니다");
++        assert_eq!(tr(ko, "To drop files, start PhotoCraft under XWayland: `{command}`"), "파일을 끌어다 놓으려면 XWayland에서 AI 포토를 실행하세요: `{command}`");
++        assert_eq!(tr(ko, "PhotoCraft Defaults"), "AI 포토 기본값");
++        assert_eq!(tr(Lang::EN, "PhotoCraft Defaults"), "AI Photo Defaults");
++        assert_eq!(tr(lang("fr"), "{n} commands are not in PhotoCraft."), tr_plain_renamed("fr", "{n} commands are not in PhotoCraft.", "AI Photo"));
++        // A case ending stuck to the name goes with it: "AI Photo" is not declined.
++        assert_eq!(rename(lang("cs"), "v PhotoCraftu.").as_ref(), "v AI Photo.");
++        // The About window keeps the original name.
++        assert_eq!(tr(ko, "About PhotoCraft"), "PhotoCraft 정보");
++        assert_eq!(tr_id(ko, "help.about", "About PhotoCraft"), "PhotoCraft 정보");
++        assert_eq!(tr(Lang::EN, "About PhotoCraft"), "About PhotoCraft");
++        // Lower-case identifiers (command lines, file names) are not the name shown to people.
++        assert_eq!(rename(Lang::EN, "flatpak run ai.storyteller.photocraft").as_ref(), "flatpak run ai.storyteller.photocraft");
++    });
++}
++
++fn tr_plain_renamed(code: &str, src: &str, name: &str) -> String {
++    let text = LANGUAGES.iter().find(|i| i.code == code).map(LangInfo::text).unwrap_or_default();
++    let (_, _, t) = parse_entries(&text).0.into_iter().find(|(c, s, _)| c.is_empty() && s == src).unwrap_or_else(|| panic!("{code}: {src:?}"));
++    t.replace(APP_NAME, name)
++}
++
++/// The same text looked up again is the same interned string: no allocation per frame.
++#[test]
++fn renamed_text_is_interned_once() {
++    let ko = lang("ko");
++    hosted(|| {
++        let a = tr(ko, "PhotoCraft Defaults");
++        let b = tr(ko, "PhotoCraft Defaults");
++        assert!(std::ptr::eq(a, b), "the second lookup reuses the first string");
++        let en = tr(Lang::EN, "PhotoCraft Defaults");
++        assert_eq!(en, "AI Photo Defaults", "Korean and other languages are interned apart");
++    });
++}
++
++/// Outside Hanpan every string keeps the name, exactly as before.
++#[test]
++fn not_embedded_keeps_the_brand() {
++    let ko = lang("ko");
++    assert!(!host_names());
++    assert_eq!(tr(ko, "{n} commands are not in PhotoCraft."), "명령 {n}개는 PhotoCraft에 없습니다.");
++    assert_eq!(tr(Lang::EN, "PhotoCraft Defaults"), "PhotoCraft Defaults");
++    assert_eq!(tr_ctx(lang("de"), "smartSvg", "PhotoCraft (internal editor)"), "PhotoCraft (interner Editor)");
++    assert_eq!(trn(Lang::EN, 2, "{n} step has no PhotoCraft equivalent yet", "{n} steps have no PhotoCraft equivalent yet"), "2 steps have no PhotoCraft equivalent yet");
++    assert_eq!(rename(Lang::EN, "PhotoCraft").as_ref(), "PhotoCraft");
++}
++
++/// The new document card's "Default Size", in the languages Hanpan's photo catalogs carry it.
++#[test]
++fn default_size_is_translated() {
++    assert_eq!(tr(lang("ko"), "Default Size"), "기본 크기");
++    assert_eq!(tr(lang("vi"), "Default Size"), "Kích thước mặc định");
++    for code in HANPAN_LANGS.iter().filter(|c| **c != "en") {
++        assert!(has(lang(code), "Default Size"), "{code}");
++    }
++}
+diff --git a/crates/ui-egui/src/i18n/id.tsv b/crates/ui-egui/src/i18n/id.tsv
+index 96c3e60713aa8333bcbe17be8dfa91c26543840e..ad68b683c6ee5d53b940257fe28300ac45018e0a 100644
+--- a/crates/ui-egui/src/i18n/id.tsv
++++ b/crates/ui-egui/src/i18n/id.tsv
+@@ -1745,6 +1745,8 @@
+ 	Custom Shape Tool	Alat Bentuk Kustom
+ 	Cyans	Cyan
+ 	Default PhotoCraft Size	Ukuran Default PhotoCraft
++# Hanpan: the new document card in embedded mode (no app name)
++	Default Size	Ukuran Default
+ 	Delete Workspace	Hapus Ruang Kerja
+ 	Diamond	Diamond
+ 	Dimensions:	Dimensi:
+diff --git a/crates/ui-egui/src/i18n/it.tsv b/crates/ui-egui/src/i18n/it.tsv
+index de1820e3c140500bcbc9546c4ab9dfb99d4d1665..e2923aa4f1b51e17c1dc75368fb109d3e0322a82 100644
+--- a/crates/ui-egui/src/i18n/it.tsv
++++ b/crates/ui-egui/src/i18n/it.tsv
+@@ -1774,6 +1774,8 @@
+ 	Custom Shape Tool	Strumento Forma personale
+ 	Cyans	Ciano
+ 	Default PhotoCraft Size	Dimensione predefinita PhotoCraft
++# Hanpan: the new document card in embedded mode (no app name)
++	Default Size	Dimensione predefinita
+ 	Delete Workspace	Elimina area di lavoro
+ 	Diamond	Diamante
+ 	Dimensions:	Dimensioni:
+diff --git a/crates/ui-egui/src/i18n/ja.tsv b/crates/ui-egui/src/i18n/ja.tsv
+index 421446e82da0a93ae445ab6b00443119c606064c..ebcb37d8b785f4fcb3d75c22db0951aa6cc6e83c 100644
+--- a/crates/ui-egui/src/i18n/ja.tsv
++++ b/crates/ui-egui/src/i18n/ja.tsv
+@@ -1782,6 +1782,8 @@
+ 	Custom Shape Tool	カスタムシェイプツール
+ 	Cyans	シアン系
+ 	Default PhotoCraft Size	PhotoCraft 既定サイズ
++# Hanpan: the new document card in embedded mode (no app name)
++	Default Size	既定サイズ
+ 	Delete Workspace	ワークスペースを削除
+ 	Diamond	ダイヤモンド形
+ 	Dimensions:	寸法:
+diff --git a/crates/ui-egui/src/i18n/ko.tsv b/crates/ui-egui/src/i18n/ko.tsv
+index a4f8774fa81783becc6ff7d737bf9188ecb388f7..7a7333a4c692293bb733305931dc4ff91b988adc 100644
+--- a/crates/ui-egui/src/i18n/ko.tsv
++++ b/crates/ui-egui/src/i18n/ko.tsv
+@@ -1757,6 +1757,8 @@
+ 	Custom Shape Tool	사용자 정의 모양 도구
+ 	Cyans	사이안 계열
+ 	Default PhotoCraft Size	PhotoCraft 기본 크기
++# Hanpan: the new document card in embedded mode (no app name)
++	Default Size	기본 크기
+ 	Delete Workspace	작업 영역 삭제
+ 	Diamond	다이아몬드
+ 	Dimensions:	치수:
+diff --git a/crates/ui-egui/src/i18n/nl.tsv b/crates/ui-egui/src/i18n/nl.tsv
+index accb06403aa590e51366abacdfacc049e1d82580..54f7dc0ee97975cf8d5dbadf7762152ec41c9116 100644
+--- a/crates/ui-egui/src/i18n/nl.tsv
++++ b/crates/ui-egui/src/i18n/nl.tsv
+@@ -1704,6 +1704,8 @@
+ 	Custom Shape Tool	Gereedschap Aangepaste vorm
+ 	Cyans	Cyaantinten
+ 	Default PhotoCraft Size	Standaardgrootte PhotoCraft
++# Hanpan: the new document card in embedded mode (no app name)
++	Default Size	Standaardgrootte
+ 	Delete Workspace	Werkruimte verwijderen
+ 	Diamond	Ruit
+ 	Dimensions:	Afmetingen:
+diff --git a/crates/ui-egui/src/i18n/pl.tsv b/crates/ui-egui/src/i18n/pl.tsv
+index 2fad09ba2c3df952ecaadc85b140b1f9854e545f..4a20745cbeaab870c7214e02d99302d888457fdb 100644
+--- a/crates/ui-egui/src/i18n/pl.tsv
++++ b/crates/ui-egui/src/i18n/pl.tsv
+@@ -1768,6 +1768,8 @@
+ 	Custom Shape Tool	Narzędzie Kształt niestandardowy
+ 	Cyans	Cyjany
+ 	Default PhotoCraft Size	Domyślny rozmiar PhotoCraft
++# Hanpan: the new document card in embedded mode (no app name)
++	Default Size	Domyślny rozmiar
+ 	Delete Workspace	Usuń obszar roboczy
+ 	Diamond	Romb
+ 	Dimensions:	Wymiary:
+diff --git a/crates/ui-egui/src/i18n/pt-br.tsv b/crates/ui-egui/src/i18n/pt-br.tsv
+index f1bbb244149b01985d1748bada6c2598b4f04668..6471f97465db6f15d1698252ab4a172beec98e81 100644
+--- a/crates/ui-egui/src/i18n/pt-br.tsv
++++ b/crates/ui-egui/src/i18n/pt-br.tsv
+@@ -1731,6 +1731,8 @@
+ 	Custom Shape Tool	Ferramenta Forma personalizada
+ 	Cyans	Cianos
+ 	Default PhotoCraft Size	Tamanho padrão do PhotoCraft
++# Hanpan: the new document card in embedded mode (no app name)
++	Default Size	Tamanho padrão
+ 	Delete Workspace	Excluir espaço de trabalho
+ 	Diamond	Diamante
+ 	Dimensions:	Dimensões:
+diff --git a/crates/ui-egui/src/i18n/ru.tsv b/crates/ui-egui/src/i18n/ru.tsv
+index 551235c3b495824267a76d75d42fa477766964e5..2b9841bf218158e83094ab503bf86663fe02f3e8 100644
+--- a/crates/ui-egui/src/i18n/ru.tsv
++++ b/crates/ui-egui/src/i18n/ru.tsv
+@@ -1656,6 +1656,8 @@
+ 	Mobile	Мобильные
+ 	Film & Video	Кино и видео
+ 	Default PhotoCraft Size	Размер PhotoCraft по умолчанию
++# Hanpan: the new document card in embedded mode (no app name)
++	Default Size	Размер по умолчанию
+ 	Clipboard	Буфер обмена
+ 	Photo (2 × 3 in)	Фото (2 × 3 дюйма)
+ 	Photo (4 × 6 in)	Фото (4 × 6 дюйма)
+diff --git a/crates/ui-egui/src/i18n/vi.tsv b/crates/ui-egui/src/i18n/vi.tsv
+index 7d651a353ebdff74ee76b4be2fea63bcc5354f96..25a5e401dd675f5cff2bca770386d2b1dcbddfed 100644
+--- a/crates/ui-egui/src/i18n/vi.tsv
++++ b/crates/ui-egui/src/i18n/vi.tsv
+@@ -2664,6 +2664,8 @@ shape	Appearance	Diện mạo
+ 	Crosswise	Ngang
+ 	Current Tool	Công cụ hiện tại
+ 	Default PhotoCraft Size	Kích thước mặc định của PhotoCraft
++# Hanpan: the new document card in embedded mode (no app name)
++	Default Size	Kích thước mặc định
+ 	Delete Workspace	Xoá không gian làm việc
+ 	Document Dimensions	Kích thước tài liệu
+ 	Document Profile	Hồ sơ tài liệu
+diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
+index 48eb2e8ca721d430da3121e9dc22e5b7afe6bd75..9f11c1ca3f4f355602231c56ee79fc217df59d43 100644
+--- a/crates/ui-egui/src/lib.rs
++++ b/crates/ui-egui/src/lib.rs
+@@ -770,6 +770,10 @@ mod input_tests;
+ #[cfg(test)]
+ mod empty_workspace_tests;
+ 
++// Hanpan: no PhotoCraft name or mark in the chrome when embedded
++#[cfg(test)]
++mod hanpan_brand_tests;
++
+ #[cfg(test)]
+ mod pen_variants_tests;
+ 
+diff --git a/crates/ui-egui/src/panels/title_bar.rs b/crates/ui-egui/src/panels/title_bar.rs
+index 7e15b13b8e5b640cf4ac9dbb44f20edc0742eda8..bd3d44f13d92f0fa37ab58db8d78555013dea0f3 100644
+--- a/crates/ui-egui/src/panels/title_bar.rs
++++ b/crates/ui-egui/src/panels/title_bar.rs
+@@ -44,11 +44,13 @@ pub fn title_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+             // Preferences › Interface › Show File Name In Title: with it off the bar keeps the
+             // app name and the unsaved dot, since the tabs already name the file (#5037).
+             let show_name = app.session.prefs().interface.show_file_name_in_title;
++            // Hanpan: inside Hanpan the bar names the document only (nothing without one)
++            let app_name = if app.services.embedded { "" } else { "PhotoCraft" };
+             let title = app
+                 .session
+                 .active()
+-                .map(|d| format!("{}{}", if show_name { d.doc.name.as_str() } else { "PhotoCraft" }, if d.is_dirty() { "  •" } else { "" }))
+-                .unwrap_or_else(|| "PhotoCraft".into());
++                .map(|d| format!("{}{}", if show_name || app.services.embedded { d.doc.name.as_str() } else { app_name }, if d.is_dirty() { "  •" } else { "" }))
++                .unwrap_or_else(|| app_name.into());
+             // The menus and the far-end controls are laid out first; the title is centred in
+             // whatever room is left between them (`free`, left to right: menus then controls, or
+             // controls then menus in a right-to-left UI), shortened or dropped rather than drawn
+@@ -61,7 +63,8 @@ pub fn title_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+                 if lead > 0.0 {
+                     ui.add_space(lead + 4.0);
+                 }
+-                if !system {
++                // Hanpan: no brand mark inside Hanpan
++                if !system && !app.services.embedded {
+                     let side = if t.pro { 18.0 } else { 20.0 };
+                     let (mark, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
+                     crate::brand::paint_mark(ui, mark);
+@@ -169,6 +172,10 @@ pub fn system_title_bar(app: &PhotocraftApp) -> bool {
+ /// document open. With Preferences › Interface › Show File Name In Title off, the file name
+ /// drops out and only the app name (and the `*`) remains (#5037).
+ pub fn window_title(app: &PhotocraftApp) -> String {
++    // Hanpan: inside Hanpan the title is the document's name only (empty without one)
++    if app.services.embedded {
++        return app.session.active().map(|d| format!("{}{}", if d.is_dirty() { "*" } else { "" }, d.doc.name)).unwrap_or_default();
++    }
+     if !app.session.prefs().interface.show_file_name_in_title {
+         return format!("{}PhotoCraft", if app.session.active().is_some_and(|d| d.is_dirty()) { "*" } else { "" });
+     }

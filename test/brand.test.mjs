@@ -1,6 +1,14 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { scanBrand, scanSource, isSourceToScan, isShippedText } from '../scripts/lib/brand.mjs'
+import {
+  scanBrand,
+  scanSource,
+  isSourceToScan,
+  isShippedText,
+  scanAppName,
+  ALLOWED,
+  newFilesOfPatch,
+} from '../scripts/lib/brand.mjs'
 
 const OK = 'Based on PhotoCraft by the ArtCraft team (MIT or Apache-2.0), modified for Hanpan.'
 
@@ -101,4 +109,80 @@ test('isShippedText: licence and notice texts, with either separator, only at th
   const no = ['index.html', 'photocraft-web_bg.wasm', 'snippets/x/licenses/y.js', 'fonts/manifest.txt', 'NOTICE.js']
   for (const p of yes) assert.ok(isShippedText(p), p)
   for (const p of no) assert.ok(!isShippedText(p), p)
+})
+
+test('the chrome names neither app', () => {
+  assert.equal(scanAppName('photo', 'crates/ui-egui/src/i18n/ko.tsv', 'ui\tPhotoCraft\t포토크래프트', ALLOWED.photo).length, 1)
+  assert.equal(scanAppName('illust', 'crates/ui-egui/src/canvas/home.rs', 'tl!("Welcome to VectorCraft")', ALLOWED.illust).length, 1)
+})
+test('About and notices may name the app', () => {
+  assert.equal(scanAppName('photo', 'crates/engine/src/shell_commands.rs', '"About PhotoCraft"', ALLOWED.photo).length, 0)
+  assert.equal(scanAppName('illust', 'crates/ui-egui/src/dialogs/about.rs', 'Icons: Lucide (ISC) + VectorCraft.', ALLOWED.illust).length, 0)
+})
+test('code identifiers are not names', () => {
+  assert.equal(scanAppName('photo', 'x.rs', 'let a = photocraft_ui_egui::PhotocraftApp::new();', ALLOWED.photo).length, 0)
+})
+
+test('scanAppName: one finding per line with file:line, the Korean names, comments skipped but not in HTML', () => {
+  const rs = '//! PhotoCraft in Hanpan\nui.label("포토크래프트");\nlet x = 1;\nui.label("PhotoCraft PhotoCraft");\n'
+  assert.deepEqual(
+    scanAppName('photo', 'crates/ui-egui/src/x.rs', rs, ALLOWED.photo).map((h) => `${h.file}:${h.line} ${h.match}`),
+    ['crates/ui-egui/src/x.rs:2 포토크래프트', 'crates/ui-egui/src/x.rs:4 PhotoCraft, PhotoCraft'],
+  )
+  const html = '<!-- 벡터크래프트 -->\n<title>Illustration editor</title>\n'
+  assert.equal(scanAppName('illust', 'apps/vectorcraft-web/index.html', html, ALLOWED.illust).length, 1)
+  // each app is checked for its own name only
+  assert.equal(scanAppName('photo', 'x.rs', 'ui.label("VectorCraft")', ALLOWED.photo).length, 0)
+})
+
+test('scanAppName: a tsv line is judged by its English column', () => {
+  const f = 'crates/ui-egui/src/i18n/ko.tsv'
+  assert.equal(scanAppName('photo', f, '\tAbout PhotoCraft\tPhotoCraft 정보', ALLOWED.photo).length, 0)
+  assert.equal(scanAppName('photo', f, '\tPhotoCraft on GitHub\tGitHub의 PhotoCraft', ALLOWED.photo).length, 1)
+  assert.equal(scanAppName('photo', f, '\tImage editor\t포토크래프트 편집기', ALLOWED.photo).length, 1)
+  assert.equal(scanAppName('photo', f, '# PhotoCraft release checks.', ALLOWED.photo).length, 0)
+})
+
+test("scanAppName: PhotoCraft's About body is allowed inside about_tab_body only", () => {
+  const f = 'crates/ui-egui/src/dialogs.rs'
+  const rs = [
+    'fn about_tab_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, tab: &str) {',
+    '    ui.label(tl!("PhotoCraft — an open-source, native image editor written in Rust."));',
+    '}',
+    '',
+    'fn other(ui: &mut egui::Ui) {',
+    '    ui.label("PhotoCraft");',
+    '}',
+  ].join('\n')
+  assert.deepEqual(scanAppName('photo', f, rs, ALLOWED.photo).map((h) => h.line), [6])
+  // the region belongs to that file only
+  assert.equal(scanAppName('photo', 'crates/ui-egui/src/other.rs', rs, ALLOWED.photo).length, 2)
+})
+
+test('scanAppName: notice files may name the app, a near name of an allowed file may not', () => {
+  for (const f of ['NOTICE', 'NOTICE.md', 'ATTRIBUTION.md', 'ASSETS.md', 'LICENSE-MIT', 'licenses/x/LICENSE.txt'])
+    assert.equal(scanAppName('illust', f, 'VectorCraft', ALLOWED.illust).length, 0, f)
+  assert.equal(scanAppName('illust', 'crates/ui-egui/src/dialogs/about_more.rs', 'VectorCraft', ALLOWED.illust).length, 1)
+  assert.equal(scanAppName('photo', 'crates/ui-egui/src/dialogs/about.rs', 'ui.label("PhotoCraft")', ALLOWED.photo).length, 1)
+})
+
+test('newFilesOfPatch: the files a patch creates, with either line ending', () => {
+  const patch = [
+    'diff --git a/crates/ui-egui/src/embedded.rs b/crates/ui-egui/src/embedded.rs',
+    'new file mode 100644',
+    'index 0000000..1111111',
+    '--- /dev/null',
+    '+++ b/crates/ui-egui/src/embedded.rs',
+    'diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs',
+    'index 2222222..3333333 100644',
+    '--- a/crates/ui-egui/src/lib.rs',
+    '+++ b/crates/ui-egui/src/lib.rs',
+    '+new file mode 100644',
+  ].join('\r\n')
+  assert.deepEqual(newFilesOfPatch(patch), ['crates/ui-egui/src/embedded.rs'])
+})
+
+test('a page API rejection naming the app is a finding: Hanpan shows it in the AI panel', () => {
+  const rs = '        let _ = reject.call1(&JsValue::NULL, &js_sys::Error::new("PhotoCraft has stopped"));'
+  assert.equal(scanAppName('photo', 'apps/photocraft-web/src/api.rs', rs, ALLOWED.photo).length, 1)
 })

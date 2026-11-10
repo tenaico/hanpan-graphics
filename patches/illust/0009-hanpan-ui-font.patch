@@ -1,0 +1,866 @@
+diff --git a/apps/vectorcraft-web/src/local_fonts.rs b/apps/vectorcraft-web/src/local_fonts.rs
+index 9e972b089a8c13f0679cf0843a3cd6a38dc8c7b8..bc48099cff85ea3ab4c101efeb5529c72fd2f340 100644
+--- a/apps/vectorcraft-web/src/local_fonts.rs
++++ b/apps/vectorcraft-web/src/local_fonts.rs
+@@ -3,13 +3,16 @@
+ //! (`window.queryLocalFonts()`, Chromium and Electron) lists them when a font menu first opens;
+ //! a family picked there has its files read (`FontData.blob()`) and added to the font database,
+ //! where the canvas, PNG export and SVG outlines or embedded fonts use them like any other font.
++//! Hanpan: the PC's own Hangul face for the interface is read the same way, but for the interface
++//! only ([`take_ui_face`]): it is not added to the font database.
+ 
+ use std::cell::RefCell;
+ use std::collections::{HashMap, HashSet};
++use std::sync::{Mutex, PoisonError};
+ 
+ use js_sys::{Array, Function, Promise, Reflect, Uint8Array};
+ use vectorcraft_text::FontDb;
+-use vectorcraft_ui_egui::local_fonts;
++use vectorcraft_ui_egui::local_fonts::{self, ListedFace, PcFaceFiles};
+ use wasm_bindgen::{JsCast as _, JsValue};
+ use wasm_bindgen_futures::JsFuture;
+ 
+@@ -18,6 +21,32 @@ thread_local! {
+     static FACES: RefCell<HashMap<String, Vec<JsValue>>> = RefCell::new(HashMap::new());
+ }
+ 
++/// Hanpan: the interface's Hangul face read, waiting for the shell's next frame.
++static UI_ARRIVED: Mutex<Option<PcFaceFiles>> = Mutex::new(None);
++
++/// Hanpan: the PC's own face for the interface's Hangul on this OS (Malgun Gothic on Windows,
++/// Apple SD Gothic Neo on a Mac), from `navigator.userAgentData.platform` (Chromium, Electron)
++/// or else `navigator.platform`.
++pub fn pc_ui_face() -> Option<&'static str> {
++    let navigator = web_sys::window()?.navigator();
++    let platform = Reflect::get(&navigator, &JsValue::from_str("userAgentData"))
++        .ok()
++        .filter(JsValue::is_object)
++        .and_then(|d| Reflect::get(&d, &JsValue::from_str("platform")).ok())
++        .and_then(|p| p.as_string())
++        .filter(|p| !p.is_empty())
++        .or_else(|| navigator.platform().ok())
++        .unwrap_or_default();
++    let face = local_fonts::ui_face_for_platform(&platform);
++    log::info!("local fonts: platform {platform:?}, interface Hangul face {face:?}");
++    face
++}
++
++/// Hanpan: the interface's Hangul face, once the PC's files are read (see [`pc_ui_face`]).
++pub fn take_ui_face() -> Option<PcFaceFiles> {
++    UI_ARRIVED.lock().unwrap_or_else(PoisonError::into_inner).take()
++}
++
+ /// Called every frame: reads the list or loads the families the menus asked for.
+ pub fn poll(ctx: &egui::Context) {
+     if local_fonts::take_list_request() {
+@@ -31,6 +60,21 @@ pub fn poll(ctx: &egui::Context) {
+             ctx.request_repaint();
+         });
+     }
++    // Hanpan: the interface's Hangul face: read for the interface only, not added to the font
++    // database (that would change which font a document's Korean text falls back to)
++    if let Some(family) = local_fonts::take_ui_face_request() {
++        let ctx = ctx.clone();
++        wasm_bindgen_futures::spawn_local(async move {
++            match load_ui(&family).await {
++                Ok(files) => {
++                    log::info!("local fonts: {family} for the interface ({} bytes, bold: {})", files.regular.len(), files.bold_names.is_some());
++                    *UI_ARRIVED.lock().unwrap_or_else(PoisonError::into_inner) = Some(files);
++                }
++                Err(e) => log::warn!("local fonts: {family} for the interface: {e}; it keeps NanumGothic"),
++            }
++            ctx.request_repaint();
++        });
++    }
+     for family in local_fonts::take_requests() {
+         let ctx = ctx.clone();
+         wasm_bindgen_futures::spawn_local(async move {
+@@ -100,6 +144,30 @@ async fn load(family: &str) -> Result<Vec<String>, String> {
+     Ok(names)
+ }
+ 
++/// Hanpan: `family`'s Regular entry (its first entry when none says Regular) and its Bold one, each
++/// with the names the list gives it, so the face is found in a collection by name. A Bold in the
++/// Regular's file (a collection) is not read twice.
++async fn load_ui(family: &str) -> Result<PcFaceFiles, String> {
++    let faces = FACES.with(|f| f.borrow().get(family).cloned()).unwrap_or_default();
++    let text = |face: &JsValue, key: &str| Reflect::get(face, &JsValue::from_str(key)).ok().and_then(|s| s.as_string()).unwrap_or_default();
++    let names = |face: &JsValue| ListedFace { postscript: text(face, "postscriptName"), full_name: text(face, "fullName") };
++    let regular = faces.iter().find(|f| text(f, "style").eq_ignore_ascii_case("Regular")).or(faces.first()).ok_or("목록에 없는 글꼴")?;
++    let (regular_names, regular) = (names(regular), bytes_of(regular).await?);
++    let (mut bold, mut bold_names) = (None, None);
++    if let Some(face) = faces.iter().find(|f| text(f, "style").eq_ignore_ascii_case("Bold")) {
++        match bytes_of(face).await {
++            Ok(bytes) => {
++                bold_names = Some(names(face));
++                if bytes.len() != regular.len() || fingerprint(&bytes) != fingerprint(&regular) {
++                    bold = Some(bytes);
++                }
++            }
++            Err(e) => log::warn!("local fonts: {family} Bold: {e}"),
++        }
++    }
++    Ok(PcFaceFiles { family: family.to_string(), regular, regular_names, bold, bold_names })
++}
++
+ /// `await fontData.blob()` as bytes.
+ async fn bytes_of(face: &JsValue) -> Result<Vec<u8>, String> {
+     let blob_fn: Function = Reflect::get(face, &JsValue::from_str("blob")).map_err(js)?.dyn_into().map_err(js)?;
+diff --git a/apps/vectorcraft-web/src/web.rs b/apps/vectorcraft-web/src/web.rs
+index 949818d32dfa6abc8086202c6e9bca5ef30a9eec..aab8cc534c651de732bd4b100f756b6419f3682f 100644
+--- a/apps/vectorcraft-web/src/web.rs
++++ b/apps/vectorcraft-web/src/web.rs
+@@ -148,6 +148,12 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
+                         if app.services.embedded {
+                             let mode = vectorcraft_ui_egui::embedded::HanpanMode::from_query(&query());
+                             vectorcraft_ui_egui::embedded::start_theme(&mut app, ctx, mode);
++                            // Hanpan: and draws the interface's Hangul in the PC's own face, as Hanpan's
++                            // other editors do (Latin stays Inter). Not waited for: the first frames
++                            // draw NanumGothic. Asked once: a graphics restart keeps the app's face
++                            if let Some(face) = crate::local_fonts::pc_ui_face() {
++                                vectorcraft_ui_egui::local_fonts::want_ui_face(face);
++                            }
+                         }
+                         app
+                     }
+@@ -387,6 +393,10 @@ impl eframe::App for WebShell {
+         }
+         let Some(app) = &mut self.app else { return };
+         crate::local_fonts::poll(ctx);
++        // Hanpan: the PC's Hangul face for the interface, once read: this frame's UI pass sets it
++        if let Some(files) = crate::local_fonts::take_ui_face() {
++            vectorcraft_ui_egui::local_fonts::install_ui_face(app, ctx, files);
++        }
+         app.tick(ctx);
+         crate::api::poll_replies();
+         app.finish_ime_logic(ctx);
+diff --git a/crates/text/src/fontdb.rs b/crates/text/src/fontdb.rs
+index 6eca651bb6b15333407a075f4f78166fe8561439..1783393e6284c15c7b33412477f2c7ddf7ff8dcd 100644
+--- a/crates/text/src/fontdb.rs
++++ b/crates/text/src/fontdb.rs
+@@ -56,7 +56,7 @@ use names::{native_family_name, norm, pick_native_label};
+ pub(crate) use scan::file_face_names_within;
+ #[cfg(test)]
+ use scan::{MAX_FACES, enumerate_faces};
+-pub use scan::{is_font_file, is_suitcase};
++pub use scan::{is_font_file, is_suitcase, named_face_index};
+ use traits::Alias;
+ #[cfg(test)]
+ use traits::{FaceKeys, face_names};
+diff --git a/crates/text/src/fontdb/scan.rs b/crates/text/src/fontdb/scan.rs
+index ebe4d4d44300182ebd9084fa62e3741a6efb6e1a..84cb87956225490b24b24e004815504a3fdbcdd4 100644
+--- a/crates/text/src/fontdb/scan.rs
++++ b/crates/text/src/fontdb/scan.rs
+@@ -95,6 +95,24 @@ pub(super) fn named_instances(
+ /// The most faces read from a (possibly damaged) collection.
+ pub(super) const MAX_FACES: u32 = 256;
+ 
++/// Hanpan: the face of the font file `data` (a single font or a collection) that a PC's font list
++/// names: by its PostScript name `postscript` or its full name `full_name` (in any language its
++/// name table has). A single font is its only face whatever it is named; a collection's face must
++/// be named so (its first face may be another weight of the family, as Apple SD Gothic Neo's
++/// Thin is). `None` when no face is, or the file is not a font that can be read.
++pub fn named_face_index(data: &[u8], postscript: &str, full_name: &str) -> Option<u32> {
++    let count = match FileRef::new(data).ok()? {
++        FileRef::Font(_) => return skrifa::FontRef::from_index(data, 0).is_ok().then_some(0),
++        FileRef::Collection(c) => c.len().min(MAX_FACES),
++    };
++    let (postscript, full_name) = (norm(postscript), norm(full_name));
++    let named = |f: &skrifa::FontRef<'_>, id: StringId, want: &str| !want.is_empty() && all_names(f, id).iter().any(|n| norm(n) == want);
++    (0..count).find(|&i| {
++        skrifa::FontRef::from_index(data, i)
++            .is_ok_and(|f| named(&f, StringId::POSTSCRIPT_NAME, &postscript) || named(&f, StringId::FULL_NAME, &full_name))
++    })
++}
++
+ /// Parse every face in `data` (a font file or collection) and the named instances of its variable
+ /// ones. Returns each style with the index of its face.
+ pub(super) fn enumerate_faces(data: &[u8]) -> Vec<(u32, FaceStyle)> {
+diff --git a/crates/text/src/lib.rs b/crates/text/src/lib.rs
+index a1b77e02aa3bfe5ef62ee6dd26993dba6ae9999b..ebc4cb56a2232c99a5045758a2689a679b3d9b67 100644
+--- a/crates/text/src/lib.rs
++++ b/crates/text/src/lib.rs
+@@ -36,8 +36,8 @@ pub use craft_fonts::{CRAFT_FONTS, CraftFont, WEB_FONTS, WebFont};
+ pub use features::{EXTRA_FEATURES, LIGATURE_TRACKING_LIMITS, MAX_STYLE_FEATURES, OtFeatures, explicit_ligatures, ligatures_suppressed_by};
+ pub use fontdb::{
+     FALLBACK_FAMILY, FontClass, FontDb, FontFace, FontMatch, FontTraits, IcfMargins, PlatformFontFiles, WantedFont, WantedFonts, app_font_dir,
+-    is_font_file, is_suitcase, set_app_font_dir, set_platform_font_files, set_user_font_dirs, set_user_font_dirs_confined, style_weight,
+-    system_font_dirs, user_font_dirs,
++    is_font_file, is_suitcase, named_face_index, set_app_font_dir, set_platform_font_files, set_user_font_dirs, set_user_font_dirs_confined,
++    style_weight, system_font_dirs, user_font_dirs,
+ };
+ pub use hyphen::{hyphenation_exceptions, set_hyphenation_exceptions};
+ use std::sync::Arc;
+diff --git a/crates/text/src/test_fonts.rs b/crates/text/src/test_fonts.rs
+index a4e0fcde6a66d103c039aef091c54d1626bc603c..b74dd5b45a68bf137edc8390d27f3b40fe461fe8 100644
+--- a/crates/text/src/test_fonts.rs
++++ b/crates/text/src/test_fonts.rs
+@@ -992,3 +992,60 @@ pub fn svg_font(family: &str, documents: &[(u16, u16, &str)]) -> Option<Vec<u8>>
+     }
+     Some(builder.build())
+ }
++
++/// Hanpan: a stand-in for a PC's Hangul face (Malgun Gothic, Apple SD Gothic Neo): the bundled
++/// Source Sans 3 Regular as `family` in `style` (full name `<family> <style>`, PostScript name
++/// `postscript`), with every Hangul syllable drawn as its `A`. `None` when it can't be built.
++pub fn hangul_font(family: &str, style: &str, postscript: &str) -> Option<Vec<u8>> {
++    const FACE: &[u8] = include_bytes!("../../../assets/fonts/SourceSans3-Regular.ttf");
++    let font = skrifa::FontRef::new(FACE).ok()?;
++    let gid = |g: GlyphId| write_fonts::types::GlyphId::new(g.to_u32());
++    let a = gid(font.charmap().map('A')?);
++    let mappings = font.charmap().mappings().filter_map(|(c, g)| Some((char::from_u32(c)?, gid(g))));
++    let hangul = ('\u{AC00}'..='\u{D7A3}').map(|c| (c, a));
++    let cmap = write_fonts::tables::cmap::Cmap::from_mappings(mappings.chain(hangul)).ok()?;
++    let full = format!("{family} {style}");
++    let name = name_table(&[(1, family), (2, style), (4, &full), (5, "Version 1.000"), (6, postscript)])?;
++    let mut builder = FontBuilder::new();
++    builder.add_raw(Tag::new(b"name"), name);
++    builder.add_table(&cmap).ok()?;
++    for r in font.table_directory.table_records() {
++        let tag = Tag::new(&r.tag().to_be_bytes());
++        if !builder.contains(tag) {
++            builder.add_raw(tag, font.table_data(r.tag())?.as_bytes());
++        }
++    }
++    Some(builder.build())
++}
++
++/// Hanpan: `fonts` (single font files) as one collection (`.ttc`), face `i` being `fonts[i]`, as a
++/// Mac keeps a family's weights (Apple SD Gothic Neo). `None` when one is not a font file.
++pub fn collection(fonts: &[Vec<u8>]) -> Option<Vec<u8>> {
++    let header = 12 + 4 * fonts.len();
++    let mut out = Vec::new();
++    out.extend_from_slice(b"ttcf");
++    out.extend_from_slice(&0x0001_0000_u32.to_be_bytes());
++    out.extend_from_slice(&u32::try_from(fonts.len()).ok()?.to_be_bytes());
++    let mut at = header;
++    let mut bodies = Vec::new();
++    for font in fonts {
++        out.extend_from_slice(&u32::try_from(at).ok()?.to_be_bytes());
++        // the table records' offsets count from the start of the collection
++        let mut body = font.clone();
++        let tables = usize::from(u16::from_be_bytes(body.get(4..6)?.try_into().ok()?));
++        for t in 0..tables {
++            let field = 12 + 16 * t + 8;
++            let offset = u32::from_be_bytes(body.get(field..field + 4)?.try_into().ok()?);
++            body[field..field + 4].copy_from_slice(&(offset + u32::try_from(at).ok()?).to_be_bytes());
++        }
++        while body.len() % 4 != 0 {
++            body.push(0);
++        }
++        at += body.len();
++        bodies.push(body);
++    }
++    for body in bodies {
++        out.extend(body);
++    }
++    Some(out)
++}
+diff --git a/crates/ui-egui/src/app.rs b/crates/ui-egui/src/app.rs
+index 404eaa81b79c010eb79c622e1f93b6a13c0e4187..b82495325250b18daa29168162c2aa16a47039f5 100644
+--- a/crates/ui-egui/src/app.rs
++++ b/crates/ui-egui/src/app.rs
+@@ -110,6 +110,8 @@ impl VectorcraftApp {
+             context: 0,
+             ui_ctx: None,
+             ui_fonts: Default::default(),
++            ui_hangul_face: None,
++            ui_hangul_drawn: None,
+             updates_rt: Default::default(),
+             frame_rate: Default::default(),
+             canvas_rect: None,
+@@ -420,9 +422,13 @@ impl VectorcraftApp {
+         if !self.fonts_ready {
+             // `set_fonts` applies at once only while no text was laid out in this pass; when it
+             // defers, the next pass applies it and this leaves input and drawing to that pass.
+-            let fonts = theme::interface_fonts();
++            // Hanpan: with the PC's Hangul face, once read (embedded mode)
++            let fonts = theme::interface_fonts_with(self.ui_hangul_face.as_ref());
+             ctx.set_fonts(fonts.clone());
+             self.fonts_ready = ctx.fonts(|applied| applied.definitions() == &fonts);
++            if self.fonts_ready {
++                self.ui_hangul_drawn = self.ui_hangul_face.as_ref().map(|face| face.family.clone());
++            }
+         }
+     }
+ 
+diff --git a/crates/ui-egui/src/embedded.rs b/crates/ui-egui/src/embedded.rs
+index f9676b5997c6222dba62350aefd0c4460d11fd3b..7d66b1bf908d764ecfc12dba08de31f48392ace2 100644
+--- a/crates/ui-egui/src/embedded.rs
++++ b/crates/ui-egui/src/embedded.rs
+@@ -138,7 +138,9 @@ impl HanpanMode {
+     }
+ }
+ 
+-/// The interface font `hanpan.status` reports (Task 4 makes it the PC's Korean font).
++/// The interface font `hanpan.status` reports while the PC's own Hangul face is not in the fonts
++/// the context has applied (not read yet, refused, or not on this PC): the served NanumGothic
++/// draws Hangul.
+ pub const UI_FONT: &str = "NanumGothic";
+ 
+ /// The error `hanpan.theme` and `hanpan.status` give outside Hanpan.
+@@ -168,9 +170,12 @@ pub fn set_theme(app: &mut crate::VectorcraftApp, ctx: &egui::Context, params: &
+     Ok(serde_json::json!({"mode": mode.name()}))
+ }
+ 
+-/// `hanpan.status {}`: `{mode, uiFont}`.
++/// `hanpan.status {}`: `{mode, uiFont}`, `uiFont` the face that draws the interface's Hangul
++/// (`Malgun Gothic`, `Apple SD Gothic Neo`, or [`UI_FONT`]): the PC's only once the context has
++/// applied the fonts holding it.
+ pub fn status(app: &crate::VectorcraftApp) -> serde_json::Value {
+-    serde_json::json!({"mode": app.ui.hanpan_mode.name(), "uiFont": UI_FONT})
++    let ui_font = app.ui_hangul_drawn.as_deref().unwrap_or(UI_FONT);
++    serde_json::json!({"mode": app.ui.hanpan_mode.name(), "uiFont": ui_font})
+ }
+ 
+ #[cfg(test)]
+@@ -361,6 +366,27 @@ mod hanpan_theme_tests {
+         assert_eq!(super::status(&app)["mode"], "light");
+     }
+ 
++    /// Task 4: `uiFont` is the face that draws the interface's Hangul: the PC's own once the font
++    /// definitions holding it are the context's, NanumGothic before that or when the PC face
++    /// could not be read.
++    #[test]
++    fn status_reports_the_face_that_draws_hangul() {
++        use crate::local_fonts::hanpan_ui_font_tests::{frame, malgun, unreadable};
++        let ctx = egui::Context::default();
++        let mut app = app(true);
++        frame(&mut app, &ctx, "File");
++        assert_eq!(status(&app)["uiFont"], "NanumGothic");
++        assert!(!crate::local_fonts::install_ui_face(&mut app, &ctx, unreadable(b"not a font")));
++        frame(&mut app, &ctx, "File");
++        assert_eq!(status(&app)["uiFont"], "NanumGothic", "an unreadable PC face changes nothing");
++        assert!(crate::local_fonts::install_ui_face(&mut app, &ctx, malgun()));
++        assert_eq!(status(&app)["uiFont"], "NanumGothic", "not drawn yet: the context still has the old fonts");
++        frame(&mut app, &ctx, "File");
++        assert!(ctx.fonts(|f| f.definitions().font_data.contains_key("pc-hangul:Malgun Gothic")));
++        assert_eq!(status(&app)["uiFont"], "Malgun Gothic");
++        assert_eq!(status(&app)["mode"], "light");
++    }
++
+     #[test]
+     fn hanpan_theme_refused_when_not_embedded() {
+         let ctx = egui::Context::default();
+diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
+index 03d258c3449dc6297512ab04105d3ea322c9e293..e707bc9cbcae4965d9c3671fafa3b6171d42517e 100644
+--- a/crates/ui-egui/src/lib.rs
++++ b/crates/ui-egui/src/lib.rs
+@@ -169,6 +169,12 @@ pub struct VectorcraftApp {
+     ui_ctx: Option<egui::Context>,
+     /// Installed fonts added to the UI's for characters its own fonts lack (CJK names…).
+     ui_fonts: ui_fonts::UiFonts,
++    /// Hanpan: the PC's own face for the interface's Hangul (embedded mode), once the browser read
++    /// it ([`local_fonts::install_ui_face`]): every context's interface fonts include it.
++    ui_hangul_face: Option<theme::UiHangulFace>,
++    /// Hanpan: the family of the PC face in the fonts the context has applied (`hanpan.status`'s
++    /// `uiFont`); `None` while NanumGothic draws the interface's Hangul.
++    ui_hangul_drawn: Option<String>,
+     pub(crate) updates_rt: updates_ui::Runtime,
+     /// The status bar's frame rate ([`frame_rate`]).
+     frame_rate: frame_rate::FrameRate,
+diff --git a/crates/ui-egui/src/local_fonts.rs b/crates/ui-egui/src/local_fonts.rs
+index 13c67dc356cee151fcd9079d1a4e2725f250bbff..797e7dd11f086bff2a05c7902c9f1c39725be7f4 100644
+--- a/crates/ui-egui/src/local_fonts.rs
++++ b/crates/ui-egui/src/local_fonts.rs
+@@ -43,10 +43,17 @@ struct State {
+     wanted: Vec<String>,
+     /// Bumped on every change, so menus build their rows again.
+     generation: u64,
++    /// Hanpan: the PC face for the interface's Hangul, waiting for the list ([`want_ui_face`]).
++    ui_face: Option<String>,
++    /// Hanpan: the PC face to read for the interface, not yet taken by the shell.
++    ui_request: Option<String>,
++    /// Hanpan: the list is being read only for [`want_ui_face`], not for a menu or a document.
++    ui_list_only: bool,
+ }
+ 
+-static STATE: Mutex<State> =
+-    Mutex::new(State {
++/// Hanpan: the state before [`enable`] (a value, so the interface face's steps can be tested
++/// without turning on the process-wide one other tests' font menus read).
++const OFF: State = State {
+     enabled: false,
+     listing: Listing::NotAsked,
+     list_requested: false,
+@@ -54,7 +61,12 @@ static STATE: Mutex<State> =
+     loads: Vec::new(),
+     wanted: Vec::new(),
+     generation: 0,
+-});
++    ui_face: None,
++    ui_request: None,
++    ui_list_only: false,
++};
++
++static STATE: Mutex<State> = Mutex::new(OFF);
+ 
+ fn state() -> MutexGuard<'static, State> {
+     STATE.lock().unwrap_or_else(PoisonError::into_inner)
+@@ -84,6 +96,9 @@ pub fn listing() -> Listing {
+ /// Asks the shell for the list: once, or again after it failed.
+ pub fn ask_list() {
+     let mut s = state();
++    if s.enabled {
++        s.ui_list_only = false;
++    }
+     if s.enabled && matches!(s.listing, Listing::NotAsked | Listing::Failed(_)) {
+         s.listing = Listing::Pending;
+         s.list_requested = true;
+@@ -98,11 +113,23 @@ pub fn take_list_request() -> bool {
+ 
+ /// For the shell: the families it read, or why it could not.
+ pub fn listed(result: Result<Vec<String>, String>) {
+-    let mut s = state();
++    listed_into(&mut state(), result);
++}
++
++fn listed_into(s: &mut State, result: Result<Vec<String>, String>) {
++    let ui_face = s.ui_face.take();
++    let ui_list_only = std::mem::take(&mut s.ui_list_only);
+     s.listing = match result {
+         Ok(mut families) => {
+             families.sort_by_key(|f| f.to_lowercase());
+             families.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
++            // Hanpan: the interface's Hangul face, if the PC has it (else NanumGothic draws it)
++            if let Some(want) = ui_face {
++                match ui_face_in_listing(&families, &want) {
++                    Some(f) => s.ui_request = Some(f),
++                    None => log::info!("local fonts: no {want} on this PC; the interface keeps NanumGothic"),
++                }
++            }
+             // the families an opened document waited for: those the PC has load now
+             for want in std::mem::take(&mut s.wanted) {
+                 if let Some(f) = families.iter().find(|f| f.eq_ignore_ascii_case(&want)).cloned()
+@@ -114,6 +141,12 @@ pub fn listed(result: Result<Vec<String>, String>) {
+             }
+             Listing::Listed(families)
+         }
++        // Hanpan: read at startup only for the interface's face (no gesture): the menus ask
++        // again themselves, as if it had not been read
++        Err(e) if ui_list_only => {
++            log::info!("local fonts: {e}; the interface keeps NanumGothic");
++            Listing::NotAsked
++        }
+         Err(e) => Listing::Failed(e),
+     };
+     s.generation = s.generation.wrapping_add(1);
+@@ -151,6 +184,7 @@ pub fn want(family: &str) -> bool {
+             true
+         }
+         _ => {
++            s.ui_list_only = false;
+             if !s.wanted.iter().any(|w| w.eq_ignore_ascii_case(family)) {
+                 s.wanted.push(family.to_string());
+             }
+@@ -164,6 +198,120 @@ pub fn want(family: &str) -> bool {
+     }
+ }
+ 
++/// Hanpan: the PC's own face for Hangul in the interface on `platform` (`navigator.platform`
++/// or `navigator.userAgentData.platform`): Malgun Gothic on Windows, Apple SD Gothic Neo on a
++/// Mac, none elsewhere (NanumGothic draws it).
++pub fn ui_face_for_platform(platform: &str) -> Option<&'static str> {
++    let p = platform.to_ascii_lowercase();
++    if p.starts_with("win") {
++        Some("Malgun Gothic")
++    } else if p.starts_with("mac") {
++        Some("Apple SD Gothic Neo")
++    } else {
++        None
++    }
++}
++
++/// Hanpan: `family` as the PC's list names it, if it is there.
++pub fn ui_face_in_listing(families: &[String], family: &str) -> Option<String> {
++    families.iter().find(|f| f.eq_ignore_ascii_case(family)).cloned()
++}
++
++/// Hanpan: asks for the PC's `family` to draw the interface's Hangul (embedded mode, at
++/// startup). It is read with the list, and only for the interface: it is not added to the font
++/// database, so the documents' fonts and their substitution do not change. Missing or refused,
++/// NanumGothic goes on drawing Hangul.
++pub fn want_ui_face(family: &str) {
++    want_ui_face_into(&mut state(), family);
++}
++
++fn want_ui_face_into(s: &mut State, family: &str) {
++    if !s.enabled {
++        return;
++    }
++    match &s.listing {
++        Listing::Listed(all) => {
++            s.ui_request = ui_face_in_listing(all, family);
++        }
++        _ => {
++            s.ui_face = Some(family.to_string());
++            if !matches!(s.listing, Listing::Pending) {
++                s.listing = Listing::Pending;
++                s.list_requested = true;
++                s.ui_list_only = true;
++            }
++        }
++    }
++    s.generation = s.generation.wrapping_add(1);
++}
++
++/// For the shell: the PC face to read for the interface now, once.
++pub fn take_ui_face_request() -> Option<String> {
++    state().ui_request.take()
++}
++
++/// Hanpan: a face as the browser's font list names it (`FontData.postscriptName`, `.fullName`).
++#[derive(Clone, Debug, Default, PartialEq, Eq)]
++pub struct ListedFace {
++    pub postscript: String,
++    pub full_name: String,
++}
++
++/// Hanpan: the files the shell read for the interface's Hangul face: the Regular entry's file and,
++/// when the PC has a Bold entry, its file (`None`: the Bold is in the Regular's file, a
++/// collection).
++#[derive(Clone, Debug, Default)]
++pub struct PcFaceFiles {
++    pub family: String,
++    pub regular: Vec<u8>,
++    pub regular_names: ListedFace,
++    pub bold: Option<Vec<u8>>,
++    pub bold_names: Option<ListedFace>,
++}
++
++/// Hanpan: the interface's Hangul face from `files`: in each file the face its list entry names
++/// (a collection's first face may be another weight). `None` when the Regular is not a font egui
++/// can read (egui panics on those); a Bold that is not is left out.
++pub fn ui_face(files: PcFaceFiles) -> Option<crate::theme::UiHangulFace> {
++    let PcFaceFiles { family, regular, regular_names, bold, bold_names } = files;
++    let at = |bytes: &[u8], names: &ListedFace| vectorcraft_text::named_face_index(bytes, &names.postscript, &names.full_name);
++    let index = at(&regular, &regular_names)?;
++    let regular = egui::FontData { index, ..egui::FontData::from_owned(regular) };
++    let bold = bold_names.and_then(|names| {
++        let data = match bold {
++            Some(bytes) => at(&bytes, &names).map(|index| egui::FontData { index, ..egui::FontData::from_owned(bytes) }),
++            // the same file: its bytes shared, not copied
++            None => at(regular.bytes(), &names).map(|index| egui::FontData::from_blob(regular.font.clone(), index)),
++        };
++        if data.is_none() {
++            log::warn!("local fonts: no readable {family} Bold; semibold Hangul uses the Regular");
++        }
++        data.map(std::sync::Arc::new)
++    });
++    Some(crate::theme::UiHangulFace { family, regular: std::sync::Arc::new(regular), bold })
++}
++
++/// Hanpan: the shell read the PC face's files (embedded mode): from the next pass the interface
++/// draws Hangul in it. The interface's fonts are set again as when the graphics restart (the
++/// fallbacks `ui_fonts` added go, and are added again for what the face lacks), and every later
++/// context gets it too. False, and nothing changes, outside Hanpan or when they are not readable
++/// fonts.
++pub fn install_ui_face(app: &mut crate::VectorcraftApp, ctx: &egui::Context, files: PcFaceFiles) -> bool {
++    if !app.services.embedded {
++        return false;
++    }
++    let family = files.family.clone();
++    let Some(face) = ui_face(files) else {
++        log::warn!("local fonts: {family} is not a readable font; the interface keeps NanumGothic");
++        return false;
++    };
++    app.ui_hangul_face = Some(face);
++    app.fonts_ready = false;
++    app.ui_fonts = Default::default();
++    ctx.request_repaint();
++    true
++}
++
+ /// For the shell: the families to load now.
+ pub fn take_requests() -> Vec<String> {
+     std::mem::take(&mut state().requested)
+@@ -311,3 +459,235 @@ mod hanpan_search_tests {
+         assert_eq!(korean_name("malgun gothic"), Some("맑은 고딕"));
+     }
+ }
++
++/// Hanpan: embedded, Hangul in the interface is drawn in the PC's own face (Malgun Gothic,
++/// Apple SD Gothic Neo), as Hanpan's other editors draw it; Latin stays Inter.
++#[cfg(test)]
++pub(crate) mod hanpan_ui_font_tests {
++    use super::*;
++    use egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
++    use egui::{FontFamily, FontId};
++    use vectorcraft_text::test_fonts::{collection, hangul_font};
++
++    /// The served NanumGothic's name in the interface's stack, as `ui_fonts` adds it.
++    pub(crate) const NANUM: &str = "NanumGothic Regular #0";
++
++    pub(crate) fn app(embedded: bool) -> crate::VectorcraftApp {
++        crate::VectorcraftApp::new(vectorcraft_engine::Session::new(), crate::Services { embedded, ..Default::default() })
++    }
++
++    /// One pass of the app, then a label of `text`.
++    pub(crate) fn frame(app: &mut crate::VectorcraftApp, ctx: &egui::Context, text: &str) {
++        ctx.run_ui(egui::RawInput::default(), |ui| {
++            app.logic(ui.ctx());
++            ui.label(text);
++        })
++        .textures_delta
++        .clear();
++    }
++
++    fn listed(postscript: &str, full_name: &str) -> ListedFace {
++        ListedFace { postscript: postscript.into(), full_name: full_name.into() }
++    }
++
++    /// Windows' Malgun Gothic as the browser reads it: a file for Regular and one for Bold.
++    pub(crate) fn malgun() -> PcFaceFiles {
++        PcFaceFiles {
++            family: "Malgun Gothic".into(),
++            regular: hangul_font("Malgun Gothic", "Regular", "MalgunGothic").expect("a test font"),
++            regular_names: listed("MalgunGothic", "Malgun Gothic"),
++            bold: Some(hangul_font("Malgun Gothic", "Bold", "MalgunGothicBold").expect("a test font")),
++            bold_names: Some(listed("MalgunGothicBold", "Malgun Gothic Bold")),
++        }
++    }
++
++    /// Malgun Gothic with Regular bytes that are not a font.
++    pub(crate) fn unreadable(regular: &[u8]) -> PcFaceFiles {
++        PcFaceFiles { regular: regular.to_vec(), bold: None, bold_names: None, ..malgun() }
++    }
++
++    /// NanumGothic arriving as `ui_fonts` adds it: the last fallback of every family.
++    fn serve_nanum(ctx: &egui::Context) {
++        let families: Vec<FontFamily> = ctx.fonts(|f| f.definitions().families.keys().cloned().collect());
++        let data = egui::FontData::from_owned(hangul_font("NanumGothic", "Regular", "NanumGothic").expect("a test font"));
++        let families = families.into_iter().map(|family| InsertFontFamily { family, priority: FontPriority::Lowest }).collect();
++        ctx.add_font(FontInsert { name: NANUM.into(), data, families });
++    }
++
++    fn stack(ctx: &egui::Context, family: &FontFamily) -> Vec<String> {
++        ctx.fonts(|f| f.definitions().families.get(family).cloned().unwrap_or_default())
++    }
++
++    fn has_hangul(ctx: &egui::Context, family: FontFamily) -> bool {
++        ctx.fonts_mut(|f| f.has_glyph(&FontId::new(13.0, family), '한'))
++    }
++
++    #[test]
++    fn the_pc_face_is_malgun_on_windows_and_apple_sd_on_a_mac() {
++        for p in ["Windows", "Win32", "Win64", "windows"] {
++            assert_eq!(ui_face_for_platform(p), Some("Malgun Gothic"), "{p}");
++        }
++        for p in ["macOS", "MacIntel", "Macintosh", "MacPPC"] {
++            assert_eq!(ui_face_for_platform(p), Some("Apple SD Gothic Neo"), "{p}");
++        }
++        for p in ["Linux x86_64", "Linux", "Android", "Chrome OS", "iPhone", ""] {
++            assert_eq!(ui_face_for_platform(p), None, "{p}: no PC face is asked for");
++        }
++    }
++
++    #[test]
++    fn the_pc_face_is_only_asked_for_when_the_pc_lists_it() {
++        let listed: Vec<String> = ["Arial", "malgun gothic", "Segoe UI"].map(String::from).to_vec();
++        assert_eq!(ui_face_in_listing(&listed, "Malgun Gothic").as_deref(), Some("malgun gothic"));
++        assert_eq!(ui_face_in_listing(&listed, "Apple SD Gothic Neo"), None);
++        assert_eq!(ui_face_in_listing(&[], "Malgun Gothic"), None);
++    }
++
++    /// Not in Hanpan (the section off): nothing is asked for.
++    #[test]
++    fn the_pc_face_is_not_asked_for_outside_hanpan() {
++        let mut s = OFF;
++        want_ui_face_into(&mut s, "Malgun Gothic");
++        assert!(!s.list_requested && s.listing == Listing::NotAsked && s.ui_face.is_none());
++        listed_into(&mut s, Ok(vec!["Malgun Gothic".into()]));
++        assert_eq!(s.ui_request, None);
++    }
++
++    /// Asked for at startup, the face is read once the list has it; the list itself was read for
++    /// it only, so a refusal leaves the menus to ask again (not "failed"), as before this change.
++    #[test]
++    fn the_pc_face_is_read_once_the_list_has_it() {
++        let enabled = || State { enabled: true, ..OFF };
++        let mut s = enabled();
++        want_ui_face_into(&mut s, "Malgun Gothic");
++        assert!(s.list_requested && s.listing == Listing::Pending);
++        listed_into(&mut s, Ok(vec!["Arial".into(), "Malgun Gothic".into()]));
++        assert_eq!(s.ui_request.as_deref(), Some("Malgun Gothic"));
++        assert!(s.requested.is_empty() && s.loads.is_empty(), "not loaded as a document font");
++        // the PC has no such face
++        let mut s = enabled();
++        want_ui_face_into(&mut s, "Apple SD Gothic Neo");
++        listed_into(&mut s, Ok(vec!["Arial".into()]));
++        assert_eq!(s.ui_request, None);
++        // refused at startup (no gesture): the menus ask again when opened
++        let mut s = enabled();
++        want_ui_face_into(&mut s, "Malgun Gothic");
++        listed_into(&mut s, Err("denied".into()));
++        assert_eq!((s.listing.clone(), s.ui_request.clone()), (Listing::NotAsked, None));
++        // a menu asked for the list meanwhile: its refusal is the menu's to show
++        let mut s = enabled();
++        want_ui_face_into(&mut s, "Malgun Gothic");
++        s.ui_list_only = false;
++        listed_into(&mut s, Err("denied".into()));
++        assert_eq!(s.listing, Listing::Failed("denied".into()));
++        // listed already: asked for at once
++        let mut s = State { listing: Listing::Listed(vec!["Malgun Gothic".into()]), ..enabled() };
++        want_ui_face_into(&mut s, "Malgun Gothic");
++        assert_eq!(s.ui_request.as_deref(), Some("Malgun Gothic"));
++        assert!(!s.list_requested);
++    }
++
++    #[test]
++    fn ui_stack_puts_the_pc_hangul_face_before_nanum() {
++        let ctx = egui::Context::default();
++        let mut app = app(true);
++        frame(&mut app, &ctx, "File");
++        assert!(!has_hangul(&ctx, FontFamily::Proportional), "the interface's own fonts have no Hangul");
++        assert!(install_ui_face(&mut app, &ctx, malgun()));
++        frame(&mut app, &ctx, "File");
++        assert!(has_hangul(&ctx, FontFamily::Proportional), "the PC face draws Hangul before NanumGothic is there");
++        // NanumGothic arriving after the PC face still goes after it
++        serve_nanum(&ctx);
++        frame(&mut app, &ctx, "File");
++        ctx.set_missing_glyph_policy(egui::MissingGlyphPolicy::Panic);
++        frame(&mut app, &ctx, "파일 한글 File");
++        let base = crate::theme::interface_fonts();
++        assert!(base.families.len() >= 5, "{:?}", base.families.keys());
++        for (family, today) in &base.families {
++            let stack = stack(&ctx, family);
++            let at = |name: &str| stack.iter().position(|n| n == name);
++            // Latin, egui's symbols and emoji and the craft fonts stay ahead, in today's order
++            assert_eq!(stack[..today.len()], today[..], "{family:?}: today's stack heads it: {stack:?}");
++            let (pc, nanum) = (at("pc-hangul:Malgun Gothic"), at(NANUM));
++            assert!(pc.is_some_and(|pc| pc >= today.len()) && nanum.is_some() && pc < nanum, "{family:?}: {stack:?}");
++            assert!(has_hangul(&ctx, family.clone()), "{family:?}");
++        }
++        // semibold labels draw Hangul in the PC face's Bold; the others never do
++        let semibold = stack(&ctx, &FontFamily::Name(crate::theme::FONT_UI_SEMIBOLD.into()));
++        let at = |name: &str| semibold.iter().position(|n| n == name);
++        assert!(at("pc-hangul:Malgun Gothic:Bold").is_some() && at("pc-hangul:Malgun Gothic:Bold") < at("pc-hangul:Malgun Gothic"), "{semibold:?}");
++        for family in [FontFamily::Proportional, FontFamily::Name(crate::theme::FONT_UI.into())] {
++            assert!(!stack(&ctx, &family).iter().any(|n| n.ends_with(":Bold")), "{family:?}: regular text does not draw bold");
++        }
++        // a new graphics context (the interface's fonts set again) keeps it, and the bytes once
++        let again = egui::Context::default();
++        frame(&mut app, &again, "File");
++        frame(&mut app, &again, "파일");
++        assert!(stack(&again, &FontFamily::Proportional).iter().any(|n| n == "pc-hangul:Malgun Gothic"));
++        let data = |ctx: &egui::Context| ctx.fonts(|f| f.definitions().font_data["pc-hangul:Malgun Gothic"].clone());
++        assert!(std::sync::Arc::ptr_eq(&data(&ctx).font, &data(&again).font), "the face's bytes are kept once");
++    }
++
++    /// Permission denied, no such face on the PC, a file that is not a font, or no PC face asked
++    /// for (not Windows or macOS): the stack is today's, and NanumGothic draws Hangul.
++    #[test]
++    fn ui_stack_without_the_pc_face_is_unchanged() {
++        for (why, files) in [("not a font", Some(unreadable(b"<html>not found</html>"))), ("empty", Some(unreadable(&[]))), ("never read", None)] {
++            let ctx = egui::Context::default();
++            let mut app = app(true);
++            frame(&mut app, &ctx, "File");
++            if let Some(files) = files {
++                assert!(!install_ui_face(&mut app, &ctx, files), "{why}");
++            }
++            frame(&mut app, &ctx, "File");
++            assert_eq!(ctx.fonts(|f| f.definitions().clone()), crate::theme::interface_fonts(), "{why}: today's stack");
++            serve_nanum(&ctx);
++            frame(&mut app, &ctx, "File");
++            ctx.set_missing_glyph_policy(egui::MissingGlyphPolicy::Panic);
++            frame(&mut app, &ctx, "파일 한글");
++            for family in [FontFamily::Proportional, FontFamily::Name(crate::theme::FONT_UI_SEMIBOLD.into())] {
++                let stack = stack(&ctx, &family);
++                assert!(!stack.iter().any(|n| n.starts_with("pc-hangul:")), "{why}: {stack:?}");
++                assert_eq!(stack.last().map(String::as_str), Some(NANUM), "{why}: NanumGothic draws Hangul");
++                assert!(has_hangul(&ctx, family), "{why}");
++            }
++        }
++        // outside Hanpan the PC face is never put in
++        let ctx = egui::Context::default();
++        let mut app = app(false);
++        frame(&mut app, &ctx, "File");
++        assert!(!install_ui_face(&mut app, &ctx, malgun()));
++        frame(&mut app, &ctx, "File");
++        assert_eq!(ctx.fonts(|f| f.definitions().clone()), crate::theme::interface_fonts(), "standalone: today's stack");
++    }
++
++    /// A Mac keeps Apple SD Gothic Neo's weights in one collection whose first face is Thin: the
++    /// faces are the ones the list's Regular and Bold entries name, read from the file once.
++    #[test]
++    fn a_collection_gives_the_faces_its_list_entries_name() {
++        let weights =
++            ["Thin", "Regular", "Bold"].map(|w| hangul_font("Apple SD Gothic Neo", w, &format!("AppleSDGothicNeo-{w}")).expect("a test font"));
++        let ttc = collection(&weights).expect("a collection");
++        let files = PcFaceFiles {
++            family: "Apple SD Gothic Neo".into(),
++            regular: ttc.clone(),
++            regular_names: listed("AppleSDGothicNeo-Regular", "Apple SD Gothic Neo Regular"),
++            bold: None,
++            bold_names: Some(listed("AppleSDGothicNeo-Bold", "Apple SD Gothic Neo Bold")),
++        };
++        let face = ui_face(files).expect("a readable face");
++        assert_eq!(face.regular.index, 1, "Regular, not the collection's first face (Thin)");
++        let bold = face.bold.expect("its Bold");
++        assert_eq!(bold.index, 2);
++        assert!(std::sync::Arc::ptr_eq(&face.regular.font, &bold.font), "one file, read once");
++        // a collection without the face the list names: nothing (NanumGothic draws Hangul)
++        let files = PcFaceFiles {
++            family: "Apple SD Gothic Neo".into(),
++            regular: ttc,
++            regular_names: listed("AppleSDGothicNeo-Medium", "Apple SD Gothic Neo Medium"),
++            bold: None,
++            bold_names: None,
++        };
++        assert!(ui_face(files).is_none());
++    }
++}
+diff --git a/crates/ui-egui/src/theme.rs b/crates/ui-egui/src/theme.rs
+index e0728e9a23277ab2f16d2426b03defa62ef24747..1d7831b58b9b2eb3370bc2f64a2131ed2d927eb7 100644
+--- a/crates/ui-egui/src/theme.rs
++++ b/crates/ui-egui/src/theme.rs
+@@ -604,6 +604,27 @@ pub fn install_fonts(ctx: &egui::Context) {
+ /// whether egui applied them at once or deferred them to the next pass (it must not take input
+ /// or draw with fallback metrics while they are pending).
+ pub fn interface_fonts() -> FontDefinitions {
++    interface_fonts_with(None)
++}
++
++/// Hanpan: the egui name of the PC's Hangul face is this and its family (its Bold ends in `:Bold`).
++pub const PC_HANGUL_PREFIX: &str = "pc-hangul:";
++
++/// Hanpan: the PC's own face for the interface's Hangul (embedded mode: Malgun Gothic, Apple SD
++/// Gothic Neo), from the files the browser read (`local_fonts::ui_face`). Clones share the bytes.
++#[derive(Clone)]
++pub struct UiHangulFace {
++    pub family: String,
++    pub regular: Arc<FontData>,
++    /// Drawn by the semibold family; `None` when the PC has no Bold (its Regular draws it).
++    pub bold: Option<Arc<FontData>>,
++}
++
++/// [`interface_fonts`] with, Hanpan embedded, the PC's Hangul face (`pc_hangul`) at the end of
++/// every family: after today's whole stack (Inter, egui's symbols and emoji, the craft fonts) and
++/// so ahead of the installed fonts `ui_fonts` adds (the served NanumGothic). It draws the Hangul
++/// NanumGothic drew and nothing an earlier face draws; the semibold family takes its Bold first.
++pub fn interface_fonts_with(pc_hangul: Option<&UiHangulFace>) -> FontDefinitions {
+     let mut fonts = FontDefinitions::default();
+     let (ui, semi, mono) = interface_faces(&mut fonts);
+     let stack = |fonts: &FontDefinitions, family: FontFamily| fonts.families.get(&family).cloned().unwrap_or_default();
+@@ -617,6 +638,21 @@ pub fn interface_fonts() -> FontDefinitions {
+     fonts.families.insert(FontFamily::Name(FONT_UI.into()), family(ui, &fallback));
+     fonts.families.insert(FontFamily::Name(FONT_MONO.into()), family(mono, &mono_fallback));
+     add_craft_fonts(&mut fonts);
++    if let Some(face) = pc_hangul {
++        let name = format!("{PC_HANGUL_PREFIX}{}", face.family);
++        fonts.font_data.insert(name.clone(), face.regular.clone());
++        let bold = face.bold.as_ref().map(|bold| {
++            let bold_name = format!("{name}:Bold");
++            fonts.font_data.insert(bold_name.clone(), bold.clone());
++            bold_name
++        });
++        for (family, stack) in fonts.families.iter_mut() {
++            if *family == FontFamily::Name(FONT_UI_SEMIBOLD.into()) {
++                stack.extend(bold.clone());
++            }
++            stack.push(name.clone());
++        }
++    }
+     fonts
+ }
+ 

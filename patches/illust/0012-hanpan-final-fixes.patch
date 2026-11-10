@@ -1,0 +1,597 @@
+diff --git a/apps/vectorcraft-web/src/local_fonts.rs b/apps/vectorcraft-web/src/local_fonts.rs
+index 21723b030fe312bf2444f64fcee406eda3ee6d17..3b40ac3db7b6bfd03ff731b22b9488e1811065de 100644
+--- a/apps/vectorcraft-web/src/local_fonts.rs
++++ b/apps/vectorcraft-web/src/local_fonts.rs
+@@ -144,11 +144,16 @@ pub fn ui_face_ready() -> bool {
+     UI_ARRIVED.lock().unwrap_or_else(PoisonError::into_inner).is_some()
+ }
+ 
+-/// Hanpan: wait until the interface face has arrived, or `until_ms` (page time) has passed.
++/// Hanpan: wait until the interface face has arrived, or `until_ms` (page time) has passed (a
++/// cap on the pauses ends it even if the page clock stands still).
+ pub async fn wait_ui_face(until_ms: f64) {
+     let Some(window) = web_sys::window() else { return };
+-    while !ui_face_ready() && UI_FALLBACK.lock().unwrap_or_else(PoisonError::into_inner).is_none() && now_ms() < until_ms {
+-        let wait = (until_ms - now_ms()).clamp(1.0, 16.0) as i32;
++    // at most the time left now in pauses: a page clock that does not move cannot hold it forever
++    let budget = (until_ms - now_ms()).max(0.0);
++    let mut waited = 0.0;
++    while !ui_face_ready() && UI_FALLBACK.lock().unwrap_or_else(PoisonError::into_inner).is_none() {
++        let Some(wait) = local_fonts::ui_face_pause(now_ms(), until_ms, waited, budget) else { break };
++        waited += f64::from(wait);
+         let mut armed = true;
+         let tick = Promise::new(&mut |resolve, _| {
+             armed = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, wait).is_ok();
+@@ -305,7 +310,5 @@ fn fingerprint(bytes: &[u8]) -> u64 {
+ }
+ 
+ fn js(e: JsValue) -> String {
+-    e.as_string()
+-        .or_else(|| Reflect::get(&e, &JsValue::from_str("message")).ok().and_then(|m| m.as_string()))
+-        .unwrap_or_else(|| format!("{e:?}"))
++    e.as_string().or_else(|| Reflect::get(&e, &JsValue::from_str("message")).ok().and_then(|m| m.as_string())).unwrap_or_else(|| format!("{e:?}"))
+ }
+diff --git a/apps/vectorcraft-web/src/web.rs b/apps/vectorcraft-web/src/web.rs
+index a006b63cc5f259c29b671b7773a3533b31889aa4..22c6914d5e710d29cc0682e51b3c50705271e025 100644
+--- a/apps/vectorcraft-web/src/web.rs
++++ b/apps/vectorcraft-web/src/web.rs
+@@ -72,8 +72,9 @@ pub fn start() {
+     // editors do (Latin stays Inter): read from now, while the page's other startup work runs.
+     // When the first frame would come before it, it waits for it under the loading text, at most
+     // UI_FACE_HOLD_MS from here; past that it draws NanumGothic and the face replaces it when it
+-    // arrives
+-    let face_wanted = vectorcraft_ui_egui::embedded::requested(&query()) && crate::local_fonts::pc_ui_face().map(crate::local_fonts::start_ui_face).is_some();
++    // arrives. A Korean interface only (`lang=ko`): others keep the served fonts and do not wait
++    let face_wanted = vectorcraft_ui_egui::local_fonts::ui_face_wanted(&query())
++        && crate::local_fonts::pc_ui_face().map(crate::local_fonts::start_ui_face).is_some();
+     let face_deadline = crate::local_fonts::now_ms() + UI_FACE_HOLD_MS;
+     wasm_bindgen_futures::spawn_local(async move {
+         // Before the first frame, which looks for copies a crash left behind.
+diff --git a/crates/text/src/craft_fonts.rs b/crates/text/src/craft_fonts.rs
+index f104d83a027388a0bf87660f367581ada2b16dbd..c3aa778e0fe092aeb18cab8681f38b95a77750c5 100644
+--- a/crates/text/src/craft_fonts.rs
++++ b/crates/text/src/craft_fonts.rs
+@@ -166,8 +166,10 @@ mod tests {
+         // The fallbacks the first frame may need: Noto Sans Arabic, Noto Sans Thai, Noto Sans
+         // Georgian and (Hanpan) NanumGothic for Hangul, where the checkout has them.
+         let startup: Vec<_> = WEB_FONTS.iter().filter(|w| w.startup).map(|w| w.family).collect();
+-        let expected: Vec<_> =
+-            ["Noto Sans Arabic", "Noto Sans Thai", "Noto Sans Georgian", "NanumGothic"].into_iter().filter(|n| CRAFT_FONTS.iter().any(|f| f.family == *n)).collect();
++        let expected: Vec<_> = ["Noto Sans Arabic", "Noto Sans Thai", "Noto Sans Georgian", "NanumGothic"]
++            .into_iter()
++            .filter(|n| CRAFT_FONTS.iter().any(|f| f.family == *n))
++            .collect();
+         assert_eq!(startup, expected);
+     }
+ }
+diff --git a/crates/ui-egui/src/canvas.rs b/crates/ui-egui/src/canvas.rs
+index c5350a2c072bcb2ccb67ae122b5717e658d6ad26..c0081761c37edd3c5c58684b6d0bfb9e5b540bdb 100644
+--- a/crates/ui-egui/src/canvas.rs
++++ b/crates/ui-egui/src/canvas.rs
+@@ -791,7 +791,13 @@ fn artboard_edges(
+             // At the artboard's own top-left corner, which a rotated view turns away from its
+             // bounding box's (#1095).
+             let corner = xf.to_screen(Point::new(ab.rect.x0, ab.rect.y0));
+-            artboard_label(painter, corner, (ab.rect.width() * xf.zoom) as f32, &format!("{:02} - {}", i + 1, crate::i18n::default_name(crate::i18n::current(), &ab.name)), t.text_dim);
++            artboard_label(
++                painter,
++                corner,
++                (ab.rect.width() * xf.zoom) as f32,
++                &format!("{:02} - {}", i + 1, crate::i18n::default_name(crate::i18n::current(), &ab.name)),
++                t.text_dim,
++            );
+         }
+     }
+ }
+diff --git a/crates/ui-egui/src/chrome.rs b/crates/ui-egui/src/chrome.rs
+index bf258d7e0d7eb989ddc01a6c33636cbf83676e2a..4edb247737486cc369fd5e6b2daa39997e21a95c 100644
+--- a/crates/ui-egui/src/chrome.rs
++++ b/crates/ui-egui/src/chrome.rs
+@@ -51,7 +51,11 @@ pub fn app_bar(app: &mut VectorcraftApp, ui: &mut Ui) {
+     let system = system_title_bar(app);
+     let left = app.titlebar_inset.clamp(8.0, f32::from(i8::MAX)) as i8;
+     let frame = egui::Frame::NONE.fill(t.app_bar).inner_margin(egui::Margin { left, right: if custom { 0 } else { 14 }, top: 0, bottom: 0 });
+-    let bar = egui::Panel::top("app_bar").exact_size(APP_BAR_HEIGHT).frame(frame.stroke(Stroke::new(1.0, t.border))).show(ui, |ui| {
++    // Hanpan: inside Hanpan the bar has only the AI Word tab's ribbon edge under it (drawn below),
++    // no border around it and no separator
++    let edge = t.app_bar_edge;
++    let frame = if edge.is_some() { frame } else { frame.stroke(Stroke::new(1.0, t.border)) };
++    let bar = egui::Panel::top("app_bar").exact_size(APP_BAR_HEIGHT).show_separator_line(edge.is_none()).frame(frame).show(ui, |ui| {
+         // macOS draws the bar under its transparent title bar, so the bar gets the title bar's
+         // clicks: without this a double-click there zooms nothing (#1932).
+         if custom || cfg!(target_os = "macos") {
+@@ -121,6 +125,10 @@ pub fn app_bar(app: &mut VectorcraftApp, ui: &mut Ui) {
+             }
+         });
+     });
++    if let Some(edge) = edge {
++        let r = bar.response.rect;
++        ui.painter().rect_filled(egui::Rect::from_min_max(egui::pos2(r.left(), r.bottom() - 1.0), r.right_bottom()), 0.0, edge);
++    }
+     if custom {
+         titlebar::caption_buttons(app, ui, bar.response.rect);
+     }
+@@ -148,7 +156,9 @@ pub fn window_title(app: &VectorcraftApp) -> String {
+     }
+     app.session
+         .active()
+-        .map(|d| format!("{}{} \u{2014} VectorCraft", if d.is_dirty() { "*" } else { "" }, crate::i18n::default_name(crate::i18n::current(), &d.title())))
++        .map(|d| {
++            format!("{}{} \u{2014} VectorCraft", if d.is_dirty() { "*" } else { "" }, crate::i18n::default_name(crate::i18n::current(), &d.title()))
++        })
+         .unwrap_or_else(|| "VectorCraft".into())
+ }
+ 
+diff --git a/crates/ui-egui/src/chrome/status_bar.rs b/crates/ui-egui/src/chrome/status_bar.rs
+index 6bb6388020420bc6d82b27e9ba16b15e62643dec..400f0d561abe9f5564f34b237dfb6449a4fcc3b8 100644
+--- a/crates/ui-egui/src/chrome/status_bar.rs
++++ b/crates/ui-egui/src/chrome/status_bar.rs
+@@ -6,7 +6,8 @@ pub fn status_bar(app: &mut VectorcraftApp, ui: &mut Ui) {
+     let t = Tokens::get(ui.ctx());
+     egui::Panel::bottom("status_bar")
+         .exact_size(24.0)
+-        .frame(egui::Frame::NONE.fill(t.panel).inner_margin(egui::Margin::symmetric(8, 0)).stroke(Stroke::new(1.0, t.border)))
++        // Hanpan: inside Hanpan the bar is the AI Word tab's status bar (`status_bar_fill`)
++        .frame(egui::Frame::NONE.fill(t.status_bar_fill()).inner_margin(egui::Margin::symmetric(8, 0)).stroke(Stroke::new(1.0, t.border)))
+         .show(ui, |ui| {
+             ui.horizontal_centered(|ui| {
+                 let zoom = app.view().map(|v| v.zoom).unwrap_or(1.0);
+diff --git a/crates/ui-egui/src/chrome/tabs.rs b/crates/ui-egui/src/chrome/tabs.rs
+index 00ccb5e116f3a912e5074c510d3dc012f0f89070..dbba51841ce1f2201c33375096520bcb5e2cdb89 100644
+--- a/crates/ui-egui/src/chrome/tabs.rs
++++ b/crates/ui-egui/src/chrome/tabs.rs
+@@ -9,7 +9,12 @@ pub(super) fn tab_title(d: &vectorcraft_engine::DocState, zoom: f64, outline: bo
+         let color = if d.doc.color_mode == vectorcraft_doc::ColorMode::Cmyk { "CMYK" } else { "RGB" };
+         format!("{color}/{}", if outline { tl!("Outline") } else { tl!("Preview") })
+     };
+-    format!("{}{} @ {} ({mode})", crate::i18n::default_name(crate::i18n::current(), &d.title()), if d.is_dirty() { "*" } else { "" }, zoom_label(zoom, display_print_size).replace('%', " %"))
++    format!(
++        "{}{} @ {} ({mode})",
++        crate::i18n::default_name(crate::i18n::current(), &d.title()),
++        if d.is_dirty() { "*" } else { "" },
++        zoom_label(zoom, display_print_size).replace('%', " %")
++    )
+ }
+ 
+ /// The title of open document `i`'s tab, with its own view's zoom and Outline or Preview.
+@@ -277,7 +282,8 @@ pub(super) fn artboard_list(app: &VectorcraftApp, ui: &mut Ui, cur: usize) -> Op
+     const ROWS: f32 = 10.0;
+     let t = Tokens::get(ui.ctx());
+     let boards = app.session.active().map(|d| d.doc.artboards.as_slice()).unwrap_or_default();
+-    let shown = boards.get(cur).map_or_else(|| "–".to_string(), |a| format!("{}  {}", cur + 1, crate::i18n::default_name(crate::i18n::current(), &a.name)));
++    let shown =
++        boards.get(cur).map_or_else(|| "–".to_string(), |a| format!("{}  {}", cur + 1, crate::i18n::default_name(crate::i18n::current(), &a.name)));
+     // Under `drawn`, egui's temp data stores the pass the list was last drawn in.
+     let drawn = ui.scope_id().with("artboard-list");
+     let height = ROW_H * ROWS;
+@@ -322,7 +328,10 @@ pub(super) fn artboard_list(app: &VectorcraftApp, ui: &mut Ui, cur: usize) -> Op
+                                 t.text_dim,
+                             );
+                             let name_start = number_end + 10.0;
+-                            let name = egui::WidgetText::from(egui::RichText::new(crate::i18n::default_name(crate::i18n::current(), &board.name)).size(12.5)).into_galley(
++                            let name = egui::WidgetText::from(
++                                egui::RichText::new(crate::i18n::default_name(crate::i18n::current(), &board.name)).size(12.5),
++                            )
++                            .into_galley(
+                                 ui,
+                                 Some(egui::TextWrapMode::Truncate),
+                                 r.right() - 8.0 - name_start,
+diff --git a/crates/ui-egui/src/dialogs/about.rs b/crates/ui-egui/src/dialogs/about.rs
+index 2668f0d8752bbb04f971dd6adbef9778e2f5e9c0..af9753720bc85c826fea0c2a5a8ba24b0126c268 100644
+--- a/crates/ui-egui/src/dialogs/about.rs
++++ b/crates/ui-egui/src/dialogs/about.rs
+@@ -68,10 +68,8 @@ fn about_tab(app: &mut VectorcraftApp, ui: &mut egui::Ui) {
+     ui.label("Based on VectorCraft by the ArtCraft team (MIT or Apache-2.0), modified for Hanpan.");
+     ui.add_space(6.0);
+     ui.label(
+-        egui::RichText::new(tl!(
+-            "MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft."
+-        ))
+-        .size(11.0),
++        egui::RichText::new(tl!("MIT OR Apache-2.0. Fonts: Source Sans 3, Inter, JetBrains Mono (OFL). Icons: Lucide (ISC) + VectorCraft."))
++            .size(11.0),
+     );
+     // The GPU the window renders with, for bug reports (Preferences › Performance picks it).
+     if let Some(adapter) = &app.graphics_adapter {
+diff --git a/crates/ui-egui/src/dialogs/pdf_presets.rs b/crates/ui-egui/src/dialogs/pdf_presets.rs
+index 60c5f1483e49863d96437e5f631aa6bb4bc5b835..2b119014e322f0a13dc61b401c0a435f052f7eb5 100644
+--- a/crates/ui-egui/src/dialogs/pdf_presets.rs
++++ b/crates/ui-egui/src/dialogs/pdf_presets.rs
+@@ -126,7 +126,10 @@ fn body(app: &mut VectorcraftApp, ui: &mut egui::Ui, d: &mut Dialog) -> bool {
+ /// what Save PDF can't honour or apply yet.
+ fn details(ui: &mut egui::Ui, t: &Tokens, preset: &vectorcraft_pdf::PdfPreset, builtin: bool) {
+     let dim = |ui: &mut egui::Ui, text: &str| ui.label(egui::RichText::new(tl!(text)).color(t.text_dim).size(11.5));
+-    widgets::dim_label(ui, &crate::i18n::fmt(tl!("Differences from {preset}:"), &[("preset", crate::i18n::builtin_shown(crate::i18n::current(), pdf::DEFAULT_PRESET))]));
++    widgets::dim_label(
++        ui,
++        &crate::i18n::fmt(tl!("Differences from {preset}:"), &[("preset", crate::i18n::builtin_shown(crate::i18n::current(), pdf::DEFAULT_PRESET))]),
++    );
+     let base = vectorcraft_pdf::builtin_preset(pdf::DEFAULT_PRESET).map(|p| p.settings).unwrap_or_default();
+     let mut changed = pdf::changes(&preset.settings, &base);
+     changed.sort_by_key(|c| section_of(c["option"].as_str().unwrap_or_default()));
+diff --git a/crates/ui-egui/src/embedded.rs b/crates/ui-egui/src/embedded.rs
+index 076cc39835e721c7d7b8c47f05c7ad045c76c508..7d847c2c211061f70acaeb51e7f49fd2a4896215 100644
+--- a/crates/ui-egui/src/embedded.rs
++++ b/crates/ui-egui/src/embedded.rs
+@@ -68,8 +68,16 @@ pub fn blocks(id: &str, has_document: bool) -> bool {
+         "file.open" | "file.close" | "file.closeAll" | "file.clearRecent" => true,
+         // the host page owns the file and the window: nothing saved or shown inside the page, no
+         // quitting, no links out of the app, no update check of a build the host ships
+-        "file.reveal" | "file.recentFiles" | "file.saveCopy" | "file.saveAsTemplate" | "file.export.pdf" | "document.exportForOffice" | "file.revert" | "app.quit"
+-        | "help.github" | "help.checkForUpdates" => true,
++        "file.reveal"
++        | "file.recentFiles"
++        | "file.saveCopy"
++        | "file.saveAsTemplate"
++        | "file.export.pdf"
++        | "document.exportForOffice"
++        | "file.revert"
++        | "app.quit"
++        | "help.github"
++        | "help.checkForUpdates" => true,
+         "file.new" | "file.newDialog" | "file.newWithoutDialog" | "file.newFromTemplate" => has_document,
+         // the theme is the host's (`hanpan.theme`): no UI Brightness from menus, keys or palette
+         "window.brightness" => true,
+@@ -182,7 +190,8 @@ pub fn status(app: &crate::VectorcraftApp) -> serde_json::Value {
+ /// Hanpan: `status` with `uiFontSteps {step: whole ms}` when there are `steps`.
+ fn with_steps(mut status: serde_json::Value, steps: Vec<(&'static str, f64)>) -> serde_json::Value {
+     if !steps.is_empty() {
+-        let steps: serde_json::Map<String, serde_json::Value> = steps.into_iter().map(|(s, ms)| (s.to_owned(), serde_json::json!(ms.round()))).collect();
++        let steps: serde_json::Map<String, serde_json::Value> =
++            steps.into_iter().map(|(s, ms)| (s.to_owned(), serde_json::json!(ms.round()))).collect();
+         status["uiFontSteps"] = serde_json::Value::Object(steps);
+     }
+     status
+@@ -238,7 +247,10 @@ mod tests {
+         let ko = Lang::from_code("ko").expect("ko registered");
+         set_current(ko);
+         let group = tr_id(ko, "object.group", "Group");
+-        assert_eq!(shown_status("command `object.group` is not available right now: nothing selected"), format!("{group}: 지금은 할 수 없습니다. 선택된 항목이 없습니다."));
++        assert_eq!(
++            shown_status("command `object.group` is not available right now: nothing selected"),
++            format!("{group}: 지금은 할 수 없습니다. 선택된 항목이 없습니다.")
++        );
+         // a reason with no translation is left out, not shown in English
+         assert_eq!(shown_status("command `object.group` is not available right now: some new reason"), format!("{group}: 지금은 할 수 없습니다."));
+         assert_eq!(shown_status("invalid parameters for `object.group`: ids must be numbers"), "이 작업을 하지 못했습니다.");
+@@ -339,6 +351,57 @@ mod hanpan_theme_tests {
+         }
+     }
+ 
++    /// Hanpan (final review): inside Hanpan the status bar is filled with the AI Word tab's status
++    /// bar colour and the application bar has Word's ribbon edge under it; standalone keeps the
++    /// panel fill and no such edge.
++    #[test]
++    fn the_bars_draw_words_status_bar_and_ribbon_edge() {
++        let hex = |rgb: u32| egui::Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8);
++        let cases = [
++            (Some(HanpanMode::Light), Some(hex(0xf3f4f6)), Some(hex(0xd9d9d9))),
++            (Some(HanpanMode::Dark), Some(hex(0x252525)), Some(hex(0x555555))),
++            (None, None, None),
++        ];
++        for (mode, status_fill, edge) in cases {
++            let mut started = false;
++            let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1000.0, 300.0)).build_ui_state(
++                move |ui, app: &mut crate::VectorcraftApp| {
++                    if !started {
++                        crate::theme::install_fonts(ui.ctx());
++                        match mode {
++                            Some(mode) => start_theme(app, ui.ctx(), mode),
++                            None => crate::theme::apply(ui.ctx(), Brightness::Light),
++                        }
++                        started = true;
++                        return;
++                    }
++                    crate::chrome::app_bar(app, ui);
++                    crate::chrome::status_bar(app, ui);
++                },
++                app(mode.is_some()),
++            );
++            h.run_steps(3);
++            let status_fill = status_fill.unwrap_or(Tokens::get(&h.ctx).panel);
++            let rects: Vec<(egui::Rect, egui::Color32)> = h
++                .output()
++                .shapes
++                .iter()
++                .filter_map(|s| match &s.shape {
++                    egui::Shape::Rect(r) => Some((r.rect, r.fill)),
++                    _ => None,
++                })
++                .collect();
++            // the harness's own ui leaves an 8-point margin around the bars
++            let full_width = |r: &egui::Rect| r.width() >= 980.0;
++            assert!(
++                rects.iter().any(|(r, fill)| full_width(r) && r.bottom() >= 290.0 && r.height() > 10.0 && *fill == status_fill),
++                "{mode:?}: no status bar filled {status_fill:?}"
++            );
++            let edges = rects.iter().filter(|(r, fill)| full_width(r) && r.height() <= 1.0 && r.top() < 50.0 && Some(*fill) == edge).count();
++            assert_eq!(edges, usize::from(edge.is_some()), "{mode:?}: the line under the application bar");
++        }
++    }
++
+     #[test]
+     fn not_embedded_keeps_the_prefs_scheme() {
+         let ctx = egui::Context::default();
+diff --git a/crates/ui-egui/src/hanpan_brand_tests.rs b/crates/ui-egui/src/hanpan_brand_tests.rs
+index 0156184e4a6a2500a236aaa0c7784d4992bc30e2..daad4abc14f30f543bb97222138d6c70aca17691 100644
+--- a/crates/ui-egui/src/hanpan_brand_tests.rs
++++ b/crates/ui-egui/src/hanpan_brand_tests.rs
+@@ -212,7 +212,11 @@ fn embedded_pdf_presets_dialog_shows_no_name_but_keeps_the_users() {
+     const MINE_ABOUT: &str = "Made for VectorCraft fans";
+     let ctx = context();
+     let mut app = app(true, "en");
+-    app.session.prefs.pdf_presets.push(vectorcraft_pdf::PdfPreset { name: MINE.into(), description: MINE_ABOUT.into(), settings: Default::default() });
++    app.session.prefs.pdf_presets.push(vectorcraft_pdf::PdfPreset {
++        name: MINE.into(),
++        description: MINE_ABOUT.into(),
++        settings: Default::default(),
++    });
+     // On open the default (built-in) preset is selected: its name, description and the
+     // "Differences from" line.
+     crate::dialogs::pdf_presets::open(&mut app, None);
+diff --git a/crates/ui-egui/src/i18n/host_name_tests.rs b/crates/ui-egui/src/i18n/host_name_tests.rs
+index 56dc463acd7df9f96f3add8394d181e446c78fdc..7dbcff0dde31f081e8156a6315285f52f0a505ea 100644
+--- a/crates/ui-egui/src/i18n/host_name_tests.rs
++++ b/crates/ui-egui/src/i18n/host_name_tests.rs
+@@ -139,7 +139,10 @@ fn hanpan_names_read_naturally() {
+         assert_eq!(tr(ko, "Applies the next time VectorCraft starts."), "다음에 AI 일러스트를 시작할 때 적용됩니다.");
+         assert_eq!(tr(ko, "VectorCraft read this script without running it."), "AI 일러스트가 이 스크립트를 실행하지 않고 읽었습니다.");
+         assert_eq!(tr(ko, "In VectorCraft"), "AI 일러스트에서");
+-        assert_eq!(message(ko, "VectorCraft doesn't search other apps' or the system's folders: /x"), "AI 일러스트는 다른 앱이나 시스템의 폴더를 검색하지 않습니다: /x");
++        assert_eq!(
++            message(ko, "VectorCraft doesn't search other apps' or the system's folders: /x"),
++            "AI 일러스트는 다른 앱이나 시스템의 폴더를 검색하지 않습니다: /x"
++        );
+         assert_eq!(tr_ctx(ko, "file-filter", "VectorCraft Template"), "AI 일러스트 템플릿");
+         assert_eq!(tr(Lang::EN, "Quit VectorCraft"), "Quit AI Illustration");
+         assert_eq!(tr(lang("fr"), "Quit VectorCraft"), "Quitter AI Illustration");
+@@ -176,16 +179,22 @@ fn user_data_in_messages_keeps_its_name() {
+             "AI Illustration doesn't search the Shared or Public folder in Users: /Users/Shared/VectorCraft"
+         );
+         // A template the code fills in itself, then translates: only the template is renamed.
+-        let typed = fmt(tr(Lang::EN, "The name in the save panel was “{typed}”; VectorCraft added the file type's extension. Replacing the file overwrites its contents."), &[("typed", "VectorCraft")]);
+-        assert_eq!(typed, "The name in the save panel was “VectorCraft”; AI Illustration added the file type's extension. Replacing the file overwrites its contents.");
++        let typed = fmt(
++            tr(
++                Lang::EN,
++                "The name in the save panel was “{typed}”; VectorCraft added the file type's extension. Replacing the file overwrites its contents.",
++            ),
++            &[("typed", "VectorCraft")],
++        );
++        assert_eq!(
++            typed,
++            "The name in the save panel was “VectorCraft”; AI Illustration added the file type's extension. Replacing the file overwrites its contents."
++        );
+         let folder = fmt(tr(ko, "VectorCraft copies the fonts to {folder}."), &[("folder", "C:\\VectorCraft\\Fonts")]);
+         assert_eq!(folder, "AI 일러스트가 글꼴을 C:\\VectorCraft\\Fonts에 복사합니다.");
+         // An engine message with no template anywhere: its own words lose the name, a path, a
+         // quoted name or a file name in it does not.
+-        assert_eq!(
+-            message(Lang::EN, "Lock Workspace is not available in VectorCraft"),
+-            "Lock Workspace is not available in AI Illustration"
+-        );
++        assert_eq!(message(Lang::EN, "Lock Workspace is not available in VectorCraft"), "Lock Workspace is not available in AI Illustration");
+         assert_eq!(
+             message(Lang::EN, "VectorCraft stopped reading /art/VectorCraft/a.svg, `VectorCraft` and VectorCraft.svg"),
+             "AI Illustration stopped reading /art/VectorCraft/a.svg, `VectorCraft` and VectorCraft.svg"
+diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
+index 43c6842afb566dde2680ea960d4f9aaccf570150..8f79a5d8dda765a81a6128244f72c0c0ed96e9e9 100644
+--- a/crates/ui-egui/src/lib.rs
++++ b/crates/ui-egui/src/lib.rs
+@@ -38,7 +38,6 @@ pub mod dock;
+ // Hanpan: `?embedded=hanpan`, the host page owns the files
+ pub mod embedded;
+ // Hanpan: the PC's fonts in the font menus (embedded web build)
+-pub mod local_fonts;
+ mod edit_toolbar;
+ pub mod export_progress;
+ pub mod find_font;
+@@ -53,6 +52,7 @@ pub(crate) mod ime;
+ pub mod io;
+ pub mod keymap;
+ pub mod layout_migration;
++pub mod local_fonts;
+ pub mod menus;
+ pub mod native_menu;
+ pub mod opening;
+diff --git a/crates/ui-egui/src/local_fonts.rs b/crates/ui-egui/src/local_fonts.rs
+index 2830fe5eb568a94e524c7e98f842da37c76bcb92..aa0aff6946ed1c940147b505dbd56baf117903ce 100644
+--- a/crates/ui-egui/src/local_fonts.rs
++++ b/crates/ui-egui/src/local_fonts.rs
+@@ -233,6 +233,30 @@ pub fn ui_face_for_platform(platform: &str) -> Option<&'static str> {
+     }
+ }
+ 
++/// Hanpan (final review): whether the page (`location.search`) wants the interface's Hangul in
++/// the PC's own face: embedded and the interface is Korean (`lang=ko`, which Hanpan's address
++/// always carries and the interface language follows). Other languages keep the served fonts in
++/// the order their script asks for (Japanese and Chinese draw Han in their own face), and do not
++/// read the PC face or wait for it.
++pub fn ui_face_wanted(query: &str) -> bool {
++    crate::embedded::requested(query)
++        && query.trim_start_matches('?').split('&').filter_map(|kv| kv.strip_prefix("lang=")).any(|lang| {
++            let lang = lang.to_ascii_lowercase();
++            lang == "ko" || lang.starts_with("ko-")
++        })
++}
++
++/// Hanpan (final review): the next pause (ms) while the first frame waits for the interface face,
++/// or `None` to stop: once `until_ms` (page time) has passed, or once the pauses so far
++/// (`waited_ms`) add up to `budget_ms`, the cap that ends the wait even when the page clock does
++/// not move (`performance.now()` missing reads 0).
++pub fn ui_face_pause(now_ms: f64, until_ms: f64, waited_ms: f64, budget_ms: f64) -> Option<i32> {
++    if !(now_ms < until_ms && waited_ms < budget_ms) {
++        return None;
++    }
++    Some((until_ms - now_ms).min(budget_ms - waited_ms).clamp(1.0, 16.0) as i32)
++}
++
+ /// Hanpan: the PostScript names of the PC face `family`'s Regular and Bold, so the shell reads
+ /// just those two (`queryLocalFonts({postscriptNames})`) instead of listing every font first.
+ /// Windows' Malgun Gothic files say `MalgunGothic` and `MalgunGothicBold`; a Mac's Apple SD Gothic
+@@ -373,10 +397,7 @@ pub fn load_of(family: &str) -> Option<Load> {
+ /// have already (`known`, compared ignoring case).
+ pub fn families_for(query: &str, known: &[String]) -> Vec<String> {
+     let Listing::Listed(all) = listing() else { return Vec::new() };
+-    all.into_iter()
+-        .filter(|f| query.is_empty() || matches_query(f, query))
+-        .filter(|f| !known.iter().any(|k| k.eq_ignore_ascii_case(f)))
+-        .collect()
++    all.into_iter().filter(|f| query.is_empty() || matches_query(f, query)).filter(|f| !known.iter().any(|k| k.eq_ignore_ascii_case(f))).collect()
+ }
+ 
+ /// Korean names of the Korean fonts Windows and common packages install, as the browser lists
+@@ -745,4 +766,44 @@ pub(crate) mod hanpan_ui_font_tests {
+         };
+         assert!(ui_face(files).is_none());
+     }
++
++    /// Hanpan (final review): the PC face is read only for a Korean interface inside Hanpan.
++    #[test]
++    fn the_pc_face_is_wanted_only_for_a_korean_interface_inside_hanpan() {
++        assert!(ui_face_wanted("?embedded=hanpan&lang=ko&theme=light"));
++        assert!(ui_face_wanted("lang=ko&embedded=hanpan"));
++        assert!(ui_face_wanted("?embedded=hanpan&lang=ko-KR"));
++        for query in [
++            "?embedded=hanpan",
++            "?embedded=hanpan&lang=ja",
++            "?embedded=hanpan&lang=en",
++            "?embedded=hanpan&lang=vi",
++            "?embedded=hanpan&lang=kok",
++            "?lang=ko",
++        ] {
++            assert!(!ui_face_wanted(query), "{query}");
++        }
++    }
++
++    /// Hanpan (final review): the wait for the face ends at the deadline, and also when the page
++    /// clock stands still, once the pauses add up to the hold.
++    #[test]
++    fn the_wait_for_the_face_always_ends() {
++        let (mut waited, mut pauses) = (0.0, 0);
++        while let Some(ms) = ui_face_pause(0.0, 1500.0, waited, 1500.0) {
++            assert!((1..=16).contains(&ms));
++            waited += f64::from(ms);
++            pauses += 1;
++            assert!(pauses <= 200, "the wait does not end");
++        }
++        assert!(waited >= 1500.0 && waited < 1516.0, "{waited}");
++        let mut now = 100.0;
++        let mut waited = 0.0;
++        while let Some(ms) = ui_face_pause(now, 1600.0, waited, 1500.0) {
++            now += f64::from(ms) + 3.0;
++            waited += f64::from(ms);
++        }
++        assert!(now >= 1600.0 || waited >= 1500.0);
++        assert_eq!(ui_face_pause(2000.0, 1600.0, 0.0, 1500.0), None, "past the deadline");
++    }
+ }
+diff --git a/crates/ui-egui/src/theme.rs b/crates/ui-egui/src/theme.rs
+index 1d7831b58b9b2eb3370bc2f64a2131ed2d927eb7..43e4dd08d458062f05dc54f1aa9a28bb4abc873c 100644
+--- a/crates/ui-egui/src/theme.rs
++++ b/crates/ui-egui/src/theme.rs
+@@ -172,6 +172,12 @@ pub struct Tokens {
+     pub axis_x: Color32,
+     pub axis_y: Color32,
+     pub axis_z: Color32,
++    /// Hanpan: the status bar's fill in the Hanpan scheme (the AI Word tab's status bar); `None`
++    /// fills it with the panel colour, as before ([`Tokens::status_bar_fill`]).
++    pub status_bar: Option<Color32>,
++    /// Hanpan: the line under the application bar in the Hanpan scheme (Word's ribbon edge),
++    /// drawn instead of the bar's border; `None` keeps the border, as before.
++    pub app_bar_edge: Option<Color32>,
+ }
+ 
+ impl Tokens {
+@@ -223,6 +229,8 @@ impl Tokens {
+             axis_x: hex(0xef6058),
+             axis_y: hex(0x45af63),
+             axis_z: hex(0x378ef0),
++            status_bar: None,
++            app_bar_edge: None,
+         };
+         match b {
+             Brightness::Dark => base,
+@@ -481,6 +489,9 @@ impl Tokens {
+                 tab_strip: hex(0x252525),
+                 button_border: hex(0x3a3a3a),
+                 flyout_active: mark,
++                // the AI Word tab's status bar and ribbon edge (`--docs-statusbar-bg`, `--border-strong`)
++                status_bar: Some(hex(0x252525)),
++                app_bar_edge: Some(hex(0x555555)),
+                 ..Self::for_brightness(Brightness::Dark)
+             }
+         } else {
+@@ -512,6 +523,8 @@ impl Tokens {
+                 tab_strip: hex(0xf6f7f9),
+                 button_border: hex(0xe3e6ea),
+                 flyout_active: accent,
++                status_bar: Some(hex(0xf3f4f6)),
++                app_bar_edge: Some(hex(0xd9d9d9)),
+                 ..Self::for_brightness(Brightness::Light)
+             }
+         }
+@@ -537,6 +550,11 @@ impl Tokens {
+         }
+     }
+ 
++    /// Hanpan: the status bar's fill: the Hanpan scheme's own, the panel colour in every other.
++    pub fn status_bar_fill(&self) -> Color32 {
++        self.status_bar.unwrap_or(self.panel)
++    }
++
+     pub fn get(ctx: &egui::Context) -> Tokens {
+         ctx.data(|d| d.get_temp::<Tokens>(egui::Id::NULL)).unwrap_or_else(|| Tokens::for_brightness(Brightness::default()))
+     }
+@@ -935,6 +953,23 @@ mod tests {
+         }
+     }
+ 
++    /// Hanpan (final review): the status bar and the line under the application bar are the AI
++    /// Word tab's status bar (`--docs-statusbar-bg`) and ribbon edge (`--border-strong`), in the
++    /// Hanpan scheme only.
++    #[test]
++    fn hanpan_status_bar_and_app_bar_edge_match_word() {
++        let light = Tokens::hanpan(false);
++        assert_eq!((light.status_bar_fill(), light.app_bar_edge), (hex(0xf3f4f6), Some(hex(0xd9d9d9))));
++        let dark = Tokens::hanpan(true);
++        assert_eq!((dark.status_bar_fill(), dark.app_bar_edge), (hex(0x252525), Some(hex(0x555555))));
++        for scheme in Scheme::ALL {
++            for b in [Brightness::Dark, Brightness::MediumDark, Brightness::MediumLight, Brightness::Light] {
++                let t = Tokens::for_scheme(scheme, b, Accent::default());
++                assert_eq!((t.status_bar_fill(), t.app_bar_edge), (t.panel, None), "{scheme:?} {b:?}");
++            }
++        }
++    }
++
+     /// Hanpan: #3E9150 is 3.9:1 on the dark chrome, under the 4.5:1 its text (links, the active
+     /// tool in a flyout) needs, so the dark scheme draws accent marks and text a lighter shade of
+     /// it; filled buttons keep #3E9150 itself.
+diff --git a/crates/ui-egui/src/toolbar.rs b/crates/ui-egui/src/toolbar.rs
+index 3bede84370bbb0a641c74e53ad4a76a80bc7e9ec..284164c0b8efb97f90133c6ab40ca5882282ddab 100644
+--- a/crates/ui-egui/src/toolbar.rs
++++ b/crates/ui-egui/src/toolbar.rs
+@@ -109,7 +109,12 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
+     let edge = ui.available_rect_before_wrap();
+     // The user's choice: a window too short for the tools scrolls them. Hanpan: embedded in a short
+     // window (1366×768) the tools at the bottom (Hand, Zoom) would be cut off, so two columns then.
+-    let cols = if app.ui.toolbar_double || (app.services.embedded && !single_column_fits(&slots(app), app.session.prefs.tool_group_labels, edge.height())) { 2 } else { 1 };
++    let cols =
++        if app.ui.toolbar_double || (app.services.embedded && !single_column_fits(&slots(app), app.session.prefs.tool_group_labels, edge.height())) {
++            2
++        } else {
++            1
++        };
+     // Two 36 pt buttons with 2 pt either side inside the border and separator line (at 76 they
+     // overran the right border).
+     let w = if cols == 2 { 80.0 } else { WIDTH };
+@@ -980,7 +985,8 @@ pub(crate) mod tests;
+ mod hanpan_fit_tests {
+     #[test]
+     fn a_short_window_does_not_fit_one_column_and_a_tall_one_does() {
+-        let slots: Vec<(Option<&'static str>, Vec<&'static str>)> = (0..18).map(|i| (if i % 4 == 0 { Some("Group") } else { None }, vec!["tool"])).collect();
++        let slots: Vec<(Option<&'static str>, Vec<&'static str>)> =
++            (0..18).map(|i| (if i % 4 == 0 { Some("Group") } else { None }, vec!["tool"])).collect();
+         assert!(!super::single_column_fits(&slots, true, 640.0));
+         assert!(super::single_column_fits(&slots, true, 1200.0));
+     }

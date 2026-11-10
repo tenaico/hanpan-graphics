@@ -371,20 +371,25 @@
   }
 
   // Hanpan theme (?embedded=hanpan): `hanpan.theme {mode}` switches the chrome to the host's dark
-  // and back to light, `hanpan.status` reads each mode back, and the menu bar is the host's
-  // colour (spec 5.1: #252525 dark, #ffffff light) in the app's own screenshot.
+  // and back to light, `hanpan.status` reads each mode back, and in the app's own screenshot the
+  // menu bar and the status bar are the AI Word tab's colours (spec 5.1: menu bar #252525 dark,
+  // #ffffff light; status bar #252525 dark, #f3f4f6 light).
   const MENU_BAR = { dark: [0x25, 0x25, 0x25], light: [0xff, 0xff, 0xff] }
+  const STATUS_BAR = { dark: [0x25, 0x25, 0x25], light: [0xf3, 0xf4, 0xf6] }
   const hex = (c) => '#' + c.map((v) => v.toString(16).padStart(2, '0')).join('')
-  // the commonest colour of the window's top 24 rows (the menu bar)
-  const menuBarColour = async (api, global) => {
+  // the app's own screenshot as a bitmap
+  const screenshotBitmap = async (api, global) => {
     const r = global === 'photocraft' ? await api.screenshot({ focus: false }) : await api.screenshot({ data: true, focus: false })
     const b64 = r?.base64 ?? r?.pngBase64 ?? r?.dataBase64
     if (typeof b64 !== 'string') throw new Error(`no PNG in the screenshot reply: ${JSON.stringify(r).slice(0, 160)}`)
     const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))
-    const bitmap = await createImageBitmap(new Blob([bytes], { type: 'image/png' }))
-    const canvas = new OffscreenCanvas(bitmap.width, Math.min(24, bitmap.height))
+    return createImageBitmap(new Blob([bytes], { type: 'image/png' }))
+  }
+  // the commonest colour of `rows` rows of the bitmap from row `top`
+  const commonest = (bitmap, top, rows) => {
+    const canvas = new OffscreenCanvas(bitmap.width, rows)
     const g = canvas.getContext('2d')
-    g.drawImage(bitmap, 0, 0)
+    g.drawImage(bitmap, 0, -top)
     const px = g.getImageData(0, 0, canvas.width, canvas.height).data
     const counts = new Map()
     for (let i = 0; i < px.length; i += 4) {
@@ -393,6 +398,16 @@
     }
     const [k] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]
     return [(k >> 16) & 255, (k >> 8) & 255, k & 255]
+  }
+  // the menu bar (the window's top rows) and the status bar (a band just above the bottom edge);
+  // the screenshot is in physical pixels, so the bands scale with it
+  const barColours = async (api, global) => {
+    const bitmap = await screenshotBitmap(api, global)
+    const scale = bitmap.height / Math.max(1, window.innerHeight)
+    return {
+      menu: commonest(bitmap, 0, Math.min(Math.round(24 * scale), bitmap.height)),
+      status: commonest(bitmap, Math.max(0, bitmap.height - Math.round(20 * scale)), Math.max(1, Math.round(16 * scale))),
+    }
   }
   const near = (a, b) => a.every((v, i) => Math.abs(v - b[i]) <= 3)
   checks.theme = async ({ global }) => {
@@ -404,33 +419,40 @@
       const set = await api.request('hanpan.theme', { mode })
       const status = await api.request('hanpan.status', {})
       await sleep(300)
-      let bar
+      let bars
       try {
-        bar = await menuBarColour(api, global)
+        bars = await barColours(api, global)
       } catch (e) {
         return fail(`${mode}: screenshot: ${e && e.message}`)
       }
-      seen.push({ mode, set: set?.mode, status: status?.mode, bar: hex(bar) })
+      seen.push({ mode, set: set?.mode, status: status?.mode, bar: hex(bars.menu), statusBar: hex(bars.status) })
       if (status?.mode !== mode) return fail(`after hanpan.theme ${mode}: ${JSON.stringify(seen)}`)
-      if (!near(bar, MENU_BAR[mode])) return fail(`${mode}: menu bar ${hex(bar)}, want ${hex(MENU_BAR[mode])}; ${JSON.stringify(seen)}`)
+      if (!near(bars.menu, MENU_BAR[mode])) return fail(`${mode}: menu bar ${hex(bars.menu)}, want ${hex(MENU_BAR[mode])}; ${JSON.stringify(seen)}`)
+      if (!near(bars.status, STATUS_BAR[mode])) return fail(`${mode}: status bar ${hex(bars.status)}, want ${hex(STATUS_BAR[mode])}; ${JSON.stringify(seen)}`)
     }
     if (seen[0].status === seen[1].status || seen[0].bar === seen[1].bar) return fail(`dark and light read the same: ${JSON.stringify(seen)}`)
-    return ok(seen.map((s) => `${s.mode}: status ${s.status}, menu bar ${s.bar}`).join('; '))
+    return ok(seen.map((s) => `${s.mode}: status ${s.status}, menu bar ${s.bar}, status bar ${s.statusBar}`).join('; '))
   }
 
-  // Hanpan UI font (?embedded=hanpan): the interface's Hangul is drawn with the PC's own face,
-  // read at startup without a user gesture (the host allows local-fonts). Correctness and speed
-  // are judged apart:
-  // - pass: the face is applied and reported within FACE_LIMIT_MS of the app's first reply
+  // Hanpan UI font (?embedded=hanpan): with a Korean interface (`lang=ko`) the interface's Hangul
+  // is drawn with the PC's own face, read at startup without a user gesture (the host allows
+  // local-fonts); any other language keeps the served fonts and never reads the PC face.
+  // Correctness and speed are judged apart:
+  // - pass (ko): the face is applied and reported within FACE_LIMIT_MS of the app's first reply
   //   (Windows: Malgun Gothic; Mac: Apple SD Gothic Neo, or NanumGothic, the fallback, since the
   //   Mac is a beta; other systems: NanumGothic);
-  // - warning only: the face arrived more than FACE_LATE_MS after the app's first reply, so the
-  //   first screen drew Hangul in NanumGothic and its labels change width when the face arrives
-  //   (Task 4 measured 6.4 % wider). Timings depend on the PC's load: judge them on an idle PC.
+  // - pass (not ko): no PC face, reported or asked for, NO_FACE_WATCH_MS after the first reply;
+  // - warning only: the face was installed more than FACE_LATE_MS after the app's first frame
+  //   (`uiFontSteps`: installed vs firstFrame), so the first screen drew Hangul in NanumGothic and
+  //   its labels change width when the face arrives (Task 4 measured 6.4 % wider). Timings depend
+  //   on the PC's load: judge them on an idle PC.
   // The timeline is polled from the moment this script is in the page; `uiFontSteps` (the app's
   // own marks, ms since page load) says where the time went.
   const FACE_LIMIT_MS = 60000
   const FACE_LATE_MS = 300
+  const NO_FACE_WATCH_MS = 5000
+  const PC_FACES = ['Malgun Gothic', 'Apple SD Gothic Neo']
+  const koreanUi = () => /(^|[?&])lang=ko(-[^&]*)?(&|$)/i.test(location.search)
   const timeline = { injected: Math.round(performance.now()) }
   if (/(^|[?&])embedded=hanpan(&|$)/.test(location.search)) {
     ;(async () => {
@@ -468,6 +490,16 @@
     await waitFor(() => timeline.firstReply !== undefined || timeline.error, 60000)
     if (timeline.error) return fail(`hanpan.status: ${timeline.error}`)
     if (timeline.firstReply === undefined) return fail('hanpan.status gave no reply in 60s')
+    if (!koreanUi()) {
+      // not Korean: the served fonts draw the interface; the PC face is neither read nor installed
+      while (performance.now() < timeline.firstReply + NO_FACE_WATCH_MS && timeline.faceAt === undefined) await sleep(100)
+      const status = await api.request('hanpan.status', {})
+      const asked = Object.keys(status?.uiFontSteps ?? {}).filter((k) => ['asked', 'handed', 'installStart', 'installed'].includes(k))
+      const detail = `not Korean (${location.search}): uiFont ${status?.uiFont}; app steps: ${steps(status)}`
+      if (PC_FACES.includes(status?.uiFont) || timeline.faceAt !== undefined) return fail(`${detail} (want no PC face)`)
+      if (asked.length) return fail(`${detail} (the PC face was asked for: ${asked.join(', ')})`)
+      return ok(detail)
+    }
     // NanumGothic is the answer only where it is accepted: wait for the PC face elsewhere
     const deadline = timeline.firstReply + (want[0] === 'NanumGothic' ? 0 : FACE_LIMIT_MS)
     while (performance.now() < deadline && timeline.faceAt === undefined) await sleep(100)
@@ -480,10 +512,16 @@
         : late === 0
           ? "face already there at the app's first reply (+0ms)"
           : `face arrived +${late}ms after the app's first reply (which drew ${timeline.firstFont})`
-    let detail = `uiFont ${status?.uiFont}; ${when}; since page load: api ${t(timeline.api)}, first reply ${t(timeline.firstReply)}, face ${t(timeline.faceAt)}; app steps: ${steps(status)}`
+    // the app's own marks: the face installed against the first frame drawn
+    const marks = status?.uiFontSteps ?? {}
+    const afterFirstFrame =
+      typeof marks.installed === 'number' && typeof marks.firstFrame === 'number' ? Math.round(marks.installed - marks.firstFrame) : undefined
+    const frameNote = afterFirstFrame === undefined ? 'installed vs first frame: -' : `installed ${afterFirstFrame}ms after the first frame`
+    let detail = `uiFont ${status?.uiFont}; ${when}; ${frameNote}; since page load: api ${t(timeline.api)}, first reply ${t(timeline.firstReply)}, face ${t(timeline.faceAt)}; app steps: ${steps(status)}`
     if (!want.includes(status?.uiFont)) return fail(`${detail} (want ${want.join(' or ')})`)
     const result = ok(detail)
-    if (late !== undefined && late > FACE_LATE_MS) result.warning = `the face came ${late}ms after the app's first reply (over ${FACE_LATE_MS}ms): the first screen drew NanumGothic`
+    if (afterFirstFrame !== undefined && afterFirstFrame > FACE_LATE_MS)
+      result.warning = `the face was installed ${afterFirstFrame}ms after the app's first frame (over ${FACE_LATE_MS}ms): the first screen drew NanumGothic`
     return result
   }
 

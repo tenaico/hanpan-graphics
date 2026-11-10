@@ -57,10 +57,10 @@ index c482a7929b559b78b8e7dd9f8acfdd826a4f0107..4f3f82ba047ee118dd746ea9e58d4d8c
      "jobs.list",
      "ui.click",
 diff --git a/crates/ui-egui/src/control/dispatch.rs b/crates/ui-egui/src/control/dispatch.rs
-index 416682ef65116b611cad500237382fe72dc49920..5f7126785b66bb349002b66fcc34ffd565bd1946 100644
+index 416682ef65116b611cad500237382fe72dc49920..213692387bbc429bc3195cd1494c84a68c2da4cc 100644
 --- a/crates/ui-egui/src/control/dispatch.rs
 +++ b/crates/ui-egui/src/control/dispatch.rs
-@@ -270,6 +270,10 @@ impl UiSet {
+@@ -270,8 +270,14 @@ impl UiSet {
          let panels = PanelSet::parse(app, p)?;
          let view = ViewSet::parse(app, p)?;
          let theme = theme_param(p)?;
@@ -69,9 +69,14 @@ index 416682ef65116b611cad500237382fe72dc49920..5f7126785b66bb349002b66fcc34ffd5
 +            return Err("`theme` is set by the host page here (hanpan.theme)".into());
 +        }
          let brush = BrushSet::parse(app, p)?;
-         let bridge_pro = matches!(theme.unwrap_or(app.ui.theme), crate::theme::ThemeKind::Pro | crate::theme::ThemeKind::ProMedium);
+-        let bridge_pro = matches!(theme.unwrap_or(app.ui.theme), crate::theme::ThemeKind::Pro | crate::theme::ThemeKind::ProMedium);
++        let kind = theme.unwrap_or(app.ui.theme);
++        // Hanpan: the Hanpan themes draw the Pro layout's tabs
++        let bridge_pro = matches!(kind, crate::theme::ThemeKind::Pro | crate::theme::ThemeKind::ProMedium) || kind.is_hanpan();
          let legacy_update =
-@@ -1417,6 +1421,10 @@ fn app_methods(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlReques
+             crate::panel_docking::prepare_legacy_update(app, p, panels.panels.as_ref(), panels.dock_tabs.as_ref(), panels.dock.as_ref(), bridge_pro)?;
+         Ok(Self { tools, crop, panels, view, theme, brush, legacy_update })
+@@ -1417,6 +1423,10 @@ fn app_methods(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlReques
              Err(e) => err(e),
          },
          "app.exportImage" => wrap(super::export_image::export_image(app, p)),
@@ -83,7 +88,7 @@ index 416682ef65116b611cad500237382fe72dc49920..5f7126785b66bb349002b66fcc34ffd5
              app.allow_close = true;
              ctx.send_viewport_cmd(egui::ViewportCommand::Close);
 diff --git a/crates/ui-egui/src/embedded.rs b/crates/ui-egui/src/embedded.rs
-index 1d291ac8b578afd4a5cefda66e0256b9a362b630..4cdcaa7376ad8ea6dc81895d86dd447956595dc7 100644
+index 1d291ac8b578afd4a5cefda66e0256b9a362b630..31e4944550ab613cbfaadd4460fc19e49257a2b9 100644
 --- a/crates/ui-egui/src/embedded.rs
 +++ b/crates/ui-egui/src/embedded.rs
 @@ -3,7 +3,8 @@
@@ -201,7 +206,7 @@ index 1d291ac8b578afd4a5cefda66e0256b9a362b630..4cdcaa7376ad8ea6dc81895d86dd4479
  #[cfg(test)]
  mod tests {
      use super::*;
-@@ -214,3 +304,150 @@ mod tests {
+@@ -214,3 +304,179 @@ mod tests {
          });
      }
  }
@@ -326,6 +331,35 @@ index 1d291ac8b578afd4a5cefda66e0256b9a362b630..4cdcaa7376ad8ea6dc81895d86dd4479
 +            assert_eq!(reply["ok"], false, "{params}: {reply}");
 +            assert_eq!(app.ui.theme, ThemeKind::HanpanLight);
 +            assert_eq!(app.ui.hanpan_mode, HanpanMode::Light);
++        }
++    }
++
++    /// Hanpan: the Hanpan themes have the Pro layout, so the host's `ui.set {dockTabs}` picks
++    /// the same tab as under Pro (Color before Swatches), not the Studio layout's.
++    #[test]
++    fn hanpan_dock_tabs_pick_the_same_tab_as_under_pro() {
++        let ctx = egui::Context::default();
++        for index in [0, 1] {
++            // a customized workspace: `dockTabs` then resolves through the docking layout
++            let customize = |app: &mut crate::PhotocraftApp| {
++                app.run("window.panel.layout", json!({"action": {"ResizeSplit": {"path": [], "size": {"Ratio": 0.35}}}})).unwrap();
++                assert!(app.ui.docking.is_some());
++            };
++            let mut pro = app(false);
++            pro.set_theme(&ctx, ThemeKind::Pro);
++            customize(&mut pro);
++            let reply = call(&mut pro, &ctx, "ui.set", json!({"dockTabs": {"color": index}}));
++            assert_eq!(reply["ok"], true, "{reply}");
++            let want = (serde_json::to_value(&pro.ui.dock_tabs).unwrap(), serde_json::to_value(&pro.ui.docking).unwrap());
++            for mode in [HanpanMode::Dark, HanpanMode::Light] {
++                let mut app = app(true);
++                start_theme(&mut app, &ctx, mode);
++                customize(&mut app);
++                let reply = call(&mut app, &ctx, "ui.set", json!({"dockTabs": {"color": index}}));
++                assert_eq!(reply["ok"], true, "{mode:?} {index}: {reply}");
++                let got = (serde_json::to_value(&app.ui.dock_tabs).unwrap(), serde_json::to_value(&app.ui.docking).unwrap());
++                assert_eq!(got, want, "{mode:?}: dockTabs.color {index}");
++            }
 +        }
 +    }
 +

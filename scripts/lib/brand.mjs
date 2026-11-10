@@ -109,13 +109,9 @@ const APP_NAMES = {
  */
 export const ALLOWED = {
   photo: {
-    sentences: [
-      CREDIT.photo,
-      'About PhotoCraft',
-      // the page API's rejection reason once the app has stopped (apps/photocraft-web/src/api.rs,
-      // patch 0001): Hanpan's code reads it, the chrome never draws it
-      'PhotoCraft has stopped',
-    ],
+    // (no page API message: Hanpan turns a rejected request into an error its AI panel shows, so
+    // "The editor has stopped" names no app, patch 0013)
+    sentences: [CREDIT.photo, 'About PhotoCraft'],
     files: [],
     regions: [{ file: 'crates/ui-egui/src/dialogs.rs', fn: 'about_tab_body' }],
   },
@@ -123,8 +119,11 @@ export const ALLOWED = {
     sentences: [
       CREDIT.illust,
       'About VectorCraft',
-      // the iOS home-screen name of the page (apps/vectorcraft-web/index.html): only used when a
-      // phone adds the standalone site to its home screen, never drawn inside Hanpan
+      // the iOS home-screen name of the page (apps/vectorcraft-web/index.html): Safari on an
+      // iPhone or iPad reads it when the standalone site is added to the home screen. Chromium
+      // and Electron ignore it, the page's <title> is "Illustration editor", and Hanpan reads
+      // neither the title nor the meta tags of its editor frames (apps/graphics has no use of
+      // them), so inside Hanpan nobody sees it
       '<meta name="apple-mobile-web-app-title" content="VectorCraft">',
     ],
     files: ['crates/ui-egui/src/dialogs/about.rs'],

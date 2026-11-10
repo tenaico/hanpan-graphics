@@ -419,18 +419,25 @@
   }
 
   // Hanpan UI font (?embedded=hanpan): the interface's Hangul is drawn with the PC's own face,
-  // read at startup without a user gesture (the host allows local-fonts). Windows: Malgun Gothic
-  // within 10 s of the app's first reply; elsewhere NanumGothic (the fallback) is accepted too.
-  // The timeline, polled from the moment this script is in the page, says how long after the
-  // app first answered the face arrived: until then the first frames draw Hangul in NanumGothic,
-  // and labels change width when the face arrives (Task 4 measured 6.4 % wider with the PC face).
+  // read at startup without a user gesture (the host allows local-fonts). Correctness and speed
+  // are judged apart:
+  // - pass: the face is applied and reported within FACE_LIMIT_MS of the app's first reply
+  //   (Windows: Malgun Gothic; Mac: Apple SD Gothic Neo, or NanumGothic, the fallback, since the
+  //   Mac is a beta; other systems: NanumGothic);
+  // - warning only: the face arrived more than FACE_LATE_MS after the app's first reply, so the
+  //   first screen drew Hangul in NanumGothic and its labels change width when the face arrives
+  //   (Task 4 measured 6.4 % wider). Timings depend on the PC's load: judge them on an idle PC.
+  // The timeline is polled from the moment this script is in the page; `uiFontSteps` (the app's
+  // own marks, ms since page load) says where the time went.
+  const FACE_LIMIT_MS = 60000
+  const FACE_LATE_MS = 300
   const timeline = { injected: Math.round(performance.now()) }
   if (/(^|[?&])embedded=hanpan(&|$)/.test(location.search)) {
     ;(async () => {
       const api = await waitFor(() => window.photocraft ?? window.vectorcraft, 60000)
       if (!api) return
       timeline.api = Math.round(performance.now())
-      while (performance.now() - timeline.api < 60000) {
+      while (performance.now() - timeline.api < 60000 + FACE_LIMIT_MS) {
         try {
           const s = await api.request('hanpan.status', {})
           const t = Math.round(performance.now())
@@ -447,28 +454,37 @@
       }
     })()
   }
+  const steps = (s) =>
+    Object.entries(s?.uiFontSteps ?? {})
+      .sort((a, b) => a[1] - b[1])
+      .map(([k, v]) => `${k} ${v}`)
+      .join(', ') || 'none'
   checks.font = async ({ global }) => {
     const api = await waitFor(() => window[global], 60000)
     if (!api) return fail(`no window.${global}`)
     if (!/(^|[?&])embedded=hanpan(&|$)/.test(location.search)) return fail(`no embedded=hanpan in ${location.search}`)
-    const windows = /Windows/.test(navigator.userAgent)
+    const os = /Windows/.test(navigator.userAgent) ? 'windows' : /Mac OS X|Macintosh/.test(navigator.userAgent) ? 'mac' : 'other'
+    const want = { windows: ['Malgun Gothic'], mac: ['Apple SD Gothic Neo', 'NanumGothic'], other: ['NanumGothic'] }[os]
     await waitFor(() => timeline.firstReply !== undefined || timeline.error, 60000)
     if (timeline.error) return fail(`hanpan.status: ${timeline.error}`)
     if (timeline.firstReply === undefined) return fail('hanpan.status gave no reply in 60s')
-    const deadline = timeline.firstReply + 10000
+    // NanumGothic is the answer only where it is accepted: wait for the PC face elsewhere
+    const deadline = timeline.firstReply + (want[0] === 'NanumGothic' ? 0 : FACE_LIMIT_MS)
     while (performance.now() < deadline && timeline.faceAt === undefined) await sleep(100)
     const status = await api.request('hanpan.status', {})
     const t = (n) => (n === undefined ? '-' : `${n}ms`)
+    const late = timeline.faceAt === undefined ? undefined : Math.max(0, timeline.faceAt - timeline.firstReply)
     const when =
-      timeline.faceAt === undefined
-        ? 'no PC face 10s after the first reply'
-        : timeline.faceAt <= timeline.firstReply
+      late === undefined
+        ? `no PC face ${FACE_LIMIT_MS / 1000}s after the first reply`
+        : late === 0
           ? "face already there at the app's first reply (+0ms)"
-          : `face arrived +${timeline.faceAt - timeline.firstReply}ms after the app's first reply (which drew ${timeline.firstFont})`
-    const detail = `uiFont ${status?.uiFont}; ${when}; since page load: api ${t(timeline.api)}, first reply ${t(timeline.firstReply)}, face ${t(timeline.faceAt)}`
-    if (status?.uiFont === 'Malgun Gothic') return ok(detail)
-    if (!windows && status?.uiFont === 'NanumGothic') return ok(`${detail} (not Windows: fallback accepted)`)
-    return fail(detail)
+          : `face arrived +${late}ms after the app's first reply (which drew ${timeline.firstFont})`
+    let detail = `uiFont ${status?.uiFont}; ${when}; since page load: api ${t(timeline.api)}, first reply ${t(timeline.firstReply)}, face ${t(timeline.faceAt)}; app steps: ${steps(status)}`
+    if (!want.includes(status?.uiFont)) return fail(`${detail} (want ${want.join(' or ')})`)
+    const result = ok(detail)
+    if (late !== undefined && late > FACE_LATE_MS) result.warning = `the face came ${late}ms after the app's first reply (over ${FACE_LATE_MS}ms): the first screen drew NanumGothic`
+    return result
   }
 
   window.__smoke = {

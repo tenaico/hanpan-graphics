@@ -1,0 +1,356 @@
+diff --git a/apps/vectorcraft-web/src/local_fonts.rs b/apps/vectorcraft-web/src/local_fonts.rs
+index bc48099cff85ea3ab4c101efeb5529c72fd2f340..21723b030fe312bf2444f64fcee406eda3ee6d17 100644
+--- a/apps/vectorcraft-web/src/local_fonts.rs
++++ b/apps/vectorcraft-web/src/local_fonts.rs
+@@ -42,17 +42,136 @@ pub fn pc_ui_face() -> Option<&'static str> {
+     face
+ }
+ 
++/// Hanpan: milliseconds since the page started (`performance.now()`), 0 without one.
++pub fn now_ms() -> f64 {
++    web_sys::window()
++        .and_then(|w| Reflect::get(&w, &JsValue::from_str("performance")).ok())
++        .and_then(|p| {
++            let now: Function = Reflect::get(&p, &JsValue::from_str("now")).ok()?.dyn_into().ok()?;
++            now.call0(&p).ok()?.as_f64()
++        })
++        .unwrap_or(0.0)
++}
++
++/// Hanpan: record a step of the interface face now (`hanpan.status`'s `uiFontSteps`).
++pub fn step(name: &'static str) {
++    local_fonts::ui_face_step(name, now_ms());
++}
++
++/// Hanpan: called at the start of every frame: records the first frame, and the first frame after
++/// the face was installed (the pass whose fonts carry it).
++pub fn frame_step() {
++    if !local_fonts::enabled() {
++        return;
++    }
++    let steps = local_fonts::ui_face_steps();
++    let has = |name: &str| steps.iter().any(|(s, _)| *s == name);
++    if !has("firstFrame") {
++        step("firstFrame");
++    } else if has("installed") && !has("appliedFrame") {
++        step("appliedFrame");
++    }
++}
++
+ /// Hanpan: the interface's Hangul face, once the PC's files are read (see [`pc_ui_face`]).
+ pub fn take_ui_face() -> Option<PcFaceFiles> {
+     UI_ARRIVED.lock().unwrap_or_else(PoisonError::into_inner).take()
+ }
+ 
++/// Hanpan: the interface face's read failed straight away: the next frame asks for it through the
++/// list instead ([`local_fonts::want_ui_face`], which needs the section on).
++static UI_FALLBACK: Mutex<Option<&'static str>> = Mutex::new(None);
++
++/// Hanpan: start reading the interface's Hangul face `family` now, before the app exists:
++/// `queryLocalFonts({postscriptNames})` gives only its Regular and Bold, so no list of every font
++/// is read first (that list also comes with the first font menu). The Regular is read before the
++/// Bold; both go to the shell together ([`take_ui_face`]). When the PC does not give the Regular
++/// that way, the face is asked for through the list as before.
++pub fn start_ui_face(family: &'static str) {
++    step("asked");
++    wasm_bindgen_futures::spawn_local(async move {
++        match read_ui_face(family).await {
++            Ok(files) => {
++                step("handed");
++                log::info!("local fonts: {family} for the interface ({} bytes, bold: {})", files.regular.len(), files.bold_names.is_some());
++                *UI_ARRIVED.lock().unwrap_or_else(PoisonError::into_inner) = Some(files);
++            }
++            Err(e) => {
++                log::info!("local fonts: {family} by its PostScript names: {e}; reading the list instead");
++                *UI_FALLBACK.lock().unwrap_or_else(PoisonError::into_inner) = Some(family);
++            }
++        }
++    });
++}
++
++/// Hanpan: `family`'s Regular and Bold entries found by PostScript name, as [`load_ui`] gives them.
++async fn read_ui_face(family: &str) -> Result<PcFaceFiles, String> {
++    let (regular_name, bold_name) = local_fonts::ui_face_postscript(family).ok_or("no PostScript names known")?;
++    let window = web_sys::window().ok_or("no window")?;
++    let query: Function = Reflect::get(&window, &JsValue::from_str("queryLocalFonts")).map_err(js)?.dyn_into().map_err(|_| "no Local Font Access")?;
++    let options = js_sys::Object::new();
++    let names = Array::of2(&JsValue::from_str(regular_name), &JsValue::from_str(bold_name));
++    Reflect::set(&options, &JsValue::from_str("postscriptNames"), &names).map_err(js)?;
++    step("listStart");
++    let promise: Promise = query.call1(&window, &options).map_err(js)?.dyn_into().map_err(js)?;
++    let fonts = Array::from(&JsFuture::from(promise).await.map_err(js)?);
++    step("listed");
++    let text = |face: &JsValue, key: &str| Reflect::get(face, &JsValue::from_str(key)).ok().and_then(|s| s.as_string()).unwrap_or_default();
++    let names = |face: &JsValue| ListedFace { postscript: text(face, "postscriptName"), full_name: text(face, "fullName") };
++    let named = |name: &str| fonts.iter().find(|f| text(f, "postscriptName") == name);
++    let regular = named(regular_name).ok_or_else(|| format!("no {regular_name} on this PC"))?;
++    step("readStart");
++    let (regular_names, regular_bytes) = (names(&regular), bytes_of(&regular).await?);
++    step("regularRead");
++    let (mut bold, mut bold_names) = (None, None);
++    if let Some(face) = named(bold_name) {
++        match bytes_of(&face).await {
++            Ok(bytes) => {
++                bold_names = Some(names(&face));
++                if bytes.len() != regular_bytes.len() || fingerprint(&bytes) != fingerprint(&regular_bytes) {
++                    bold = Some(bytes);
++                }
++            }
++            Err(e) => log::warn!("local fonts: {family} Bold: {e}"),
++        }
++    }
++    step("boldRead");
++    Ok(PcFaceFiles { family: family.to_string(), regular: regular_bytes, regular_names, bold, bold_names })
++}
++
++/// Hanpan: has the interface face arrived (read, not yet taken by the shell)?
++pub fn ui_face_ready() -> bool {
++    UI_ARRIVED.lock().unwrap_or_else(PoisonError::into_inner).is_some()
++}
++
++/// Hanpan: wait until the interface face has arrived, or `until_ms` (page time) has passed.
++pub async fn wait_ui_face(until_ms: f64) {
++    let Some(window) = web_sys::window() else { return };
++    while !ui_face_ready() && UI_FALLBACK.lock().unwrap_or_else(PoisonError::into_inner).is_none() && now_ms() < until_ms {
++        let wait = (until_ms - now_ms()).clamp(1.0, 16.0) as i32;
++        let mut armed = true;
++        let tick = Promise::new(&mut |resolve, _| {
++            armed = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, wait).is_ok();
++        });
++        if !armed {
++            return;
++        }
++        let _ = JsFuture::from(tick).await;
++    }
++}
++
+ /// Called every frame: reads the list or loads the families the menus asked for.
+ pub fn poll(ctx: &egui::Context) {
++    // Hanpan: the interface face by PostScript name failed: ask for it through the list
++    if let Some(family) = UI_FALLBACK.lock().unwrap_or_else(PoisonError::into_inner).take() {
++        local_fonts::want_ui_face(family);
++    }
+     if local_fonts::take_list_request() {
+         let ctx = ctx.clone();
+         wasm_bindgen_futures::spawn_local(async move {
++            step("listStart");
+             let result = list().await;
++            step("listed");
+             if let Err(e) = &result {
+                 log::warn!("local fonts: {e}");
+             }
+@@ -67,6 +186,7 @@ pub fn poll(ctx: &egui::Context) {
+         wasm_bindgen_futures::spawn_local(async move {
+             match load_ui(&family).await {
+                 Ok(files) => {
++                    step("handed");
+                     log::info!("local fonts: {family} for the interface ({} bytes, bold: {})", files.regular.len(), files.bold_names.is_some());
+                     *UI_ARRIVED.lock().unwrap_or_else(PoisonError::into_inner) = Some(files);
+                 }
+@@ -152,7 +272,9 @@ async fn load_ui(family: &str) -> Result<PcFaceFiles, String> {
+     let text = |face: &JsValue, key: &str| Reflect::get(face, &JsValue::from_str(key)).ok().and_then(|s| s.as_string()).unwrap_or_default();
+     let names = |face: &JsValue| ListedFace { postscript: text(face, "postscriptName"), full_name: text(face, "fullName") };
+     let regular = faces.iter().find(|f| text(f, "style").eq_ignore_ascii_case("Regular")).or(faces.first()).ok_or("목록에 없는 글꼴")?;
++    step("readStart");
+     let (regular_names, regular) = (names(regular), bytes_of(regular).await?);
++    step("regularRead");
+     let (mut bold, mut bold_names) = (None, None);
+     if let Some(face) = faces.iter().find(|f| text(f, "style").eq_ignore_ascii_case("Bold")) {
+         match bytes_of(face).await {
+diff --git a/apps/vectorcraft-web/src/web.rs b/apps/vectorcraft-web/src/web.rs
+index 23a038f5354bf36130b14df3de6a7ae6f1bb7799..a006b63cc5f259c29b671b7773a3533b31889aa4 100644
+--- a/apps/vectorcraft-web/src/web.rs
++++ b/apps/vectorcraft-web/src/web.rs
+@@ -58,6 +58,9 @@ struct Host {
+     restarts: u32,
+ }
+ 
++/// Hanpan: how long (ms) the first frame may wait under the loading text for the PC's Hangul face.
++const UI_FACE_HOLD_MS: f64 = 1500.0;
++
+ pub fn start() {
+     eframe::WebLogger::init(log::LevelFilter::Info).ok();
+     let Some(canvas) = element(CANVAS_ID).and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok()) else {
+@@ -65,12 +68,23 @@ pub fn start() {
+         return;
+     };
+     detect_language();
++    // Hanpan: embedded, the interface's Hangul is drawn in the PC's own face, as Hanpan's other
++    // editors do (Latin stays Inter): read from now, while the page's other startup work runs.
++    // When the first frame would come before it, it waits for it under the loading text, at most
++    // UI_FACE_HOLD_MS from here; past that it draws NanumGothic and the face replaces it when it
++    // arrives
++    let face_wanted = vectorcraft_ui_egui::embedded::requested(&query()) && crate::local_fonts::pc_ui_face().map(crate::local_fonts::start_ui_face).is_some();
++    let face_deadline = crate::local_fonts::now_ms() + UI_FACE_HOLD_MS;
+     wasm_bindgen_futures::spawn_local(async move {
+         // Before the first frame, which looks for copies a crash left behind.
+         let locks = WebLocks::start(RECOVERY_PREFIX).await;
+         // Fallback fonts the first frame needs (Noto Sans Arabic), fetched while the loading text
+         // shows; the rest load in the background once the app runs.
+         crate::fonts::load_startup_fonts().await;
++        if face_wanted {
++            crate::local_fonts::wait_ui_face(face_deadline).await;
++            crate::local_fonts::step(if crate::local_fonts::ui_face_ready() { "heldUntilFace" } else { "heldUntilDeadline" });
++        }
+         let host = Host {
+             runner: eframe::WebRunner::new(),
+             inbox: Arc::default(),
+@@ -148,11 +162,13 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
+                         if app.services.embedded {
+                             let mode = vectorcraft_ui_egui::embedded::HanpanMode::from_query(&query());
+                             vectorcraft_ui_egui::embedded::start_theme(&mut app, ctx, mode);
+-                            // Hanpan: and draws the interface's Hangul in the PC's own face, as Hanpan's
+-                            // other editors do (Latin stays Inter). Not waited for: the first frames
+-                            // draw NanumGothic. Asked once: a graphics restart keeps the app's face
+-                            if let Some(face) = crate::local_fonts::pc_ui_face() {
+-                                vectorcraft_ui_egui::local_fonts::want_ui_face(face);
++                            // Hanpan: and draws the interface's Hangul in the PC's own face, read
++                            // since the page started (`start`): when it is here, the first frame
++                            // draws it. Installed once: a graphics restart keeps the app's face
++                            if let Some(files) = crate::local_fonts::take_ui_face() {
++                                crate::local_fonts::step("installStart");
++                                vectorcraft_ui_egui::local_fonts::install_ui_face(&mut app, ctx, files);
++                                crate::local_fonts::step("installed");
+                             }
+                         }
+                         app
+@@ -395,10 +411,14 @@ impl eframe::App for WebShell {
+             self.restart(&why);
+         }
+         let Some(app) = &mut self.app else { return };
++        // Hanpan: the frames around the interface face (`uiFontSteps`)
++        crate::local_fonts::frame_step();
+         crate::local_fonts::poll(ctx);
+         // Hanpan: the PC's Hangul face for the interface, once read: this frame's UI pass sets it
+         if let Some(files) = crate::local_fonts::take_ui_face() {
++            crate::local_fonts::step("installStart");
+             vectorcraft_ui_egui::local_fonts::install_ui_face(app, ctx, files);
++            crate::local_fonts::step("installed");
+         }
+         app.tick(ctx);
+         crate::api::poll_replies();
+diff --git a/crates/ui-egui/src/embedded.rs b/crates/ui-egui/src/embedded.rs
+index 7d66b1bf908d764ecfc12dba08de31f48392ace2..076cc39835e721c7d7b8c47f05c7ad045c76c508 100644
+--- a/crates/ui-egui/src/embedded.rs
++++ b/crates/ui-egui/src/embedded.rs
+@@ -172,10 +172,20 @@ pub fn set_theme(app: &mut crate::VectorcraftApp, ctx: &egui::Context, params: &
+ 
+ /// `hanpan.status {}`: `{mode, uiFont}`, `uiFont` the face that draws the interface's Hangul
+ /// (`Malgun Gothic`, `Apple SD Gothic Neo`, or [`UI_FONT`]): the PC's only once the context has
+-/// applied the fonts holding it.
++/// applied the fonts holding it. Hanpan: once the web shell has recorded steps of reading that
++/// face, also `uiFontSteps {step: ms since the page started}`.
+ pub fn status(app: &crate::VectorcraftApp) -> serde_json::Value {
+     let ui_font = app.ui_hangul_drawn.as_deref().unwrap_or(UI_FONT);
+-    serde_json::json!({"mode": app.ui.hanpan_mode.name(), "uiFont": ui_font})
++    with_steps(serde_json::json!({"mode": app.ui.hanpan_mode.name(), "uiFont": ui_font}), crate::local_fonts::ui_face_steps())
++}
++
++/// Hanpan: `status` with `uiFontSteps {step: whole ms}` when there are `steps`.
++fn with_steps(mut status: serde_json::Value, steps: Vec<(&'static str, f64)>) -> serde_json::Value {
++    if !steps.is_empty() {
++        let steps: serde_json::Map<String, serde_json::Value> = steps.into_iter().map(|(s, ms)| (s.to_owned(), serde_json::json!(ms.round()))).collect();
++        status["uiFontSteps"] = serde_json::Value::Object(steps);
++    }
++    status
+ }
+ 
+ #[cfg(test)]
+@@ -366,6 +376,17 @@ mod hanpan_theme_tests {
+         assert_eq!(super::status(&app)["mode"], "light");
+     }
+ 
++    /// Hanpan (review fix): the web shell's steps of reading the interface face, for release checks.
++    #[test]
++    fn status_reports_the_font_steps_once_there_are_some() {
++        let base = json!({"mode": "light", "uiFont": "NanumGothic"});
++        assert_eq!(with_steps(base.clone(), Vec::new()), base, "no steps (native, or standalone): the reply is as before");
++        assert_eq!(
++            with_steps(base, vec![("asked", 12.4), ("installed", 340.6)]),
++            json!({"mode": "light", "uiFont": "NanumGothic", "uiFontSteps": {"asked": 12.0, "installed": 341.0}})
++        );
++    }
++
+     /// Task 4: `uiFont` is the face that draws the interface's Hangul: the PC's own once the font
+     /// definitions holding it are the context's, NanumGothic before that or when the PC face
+     /// could not be read.
+diff --git a/crates/ui-egui/src/local_fonts.rs b/crates/ui-egui/src/local_fonts.rs
+index 797e7dd11f086bff2a05c7902c9f1c39725be7f4..2830fe5eb568a94e524c7e98f842da37c76bcb92 100644
+--- a/crates/ui-egui/src/local_fonts.rs
++++ b/crates/ui-egui/src/local_fonts.rs
+@@ -72,6 +72,27 @@ fn state() -> MutexGuard<'static, State> {
+     STATE.lock().unwrap_or_else(PoisonError::into_inner)
+ }
+ 
++/// Hanpan: when each step of reading the interface's Hangul face happened, in milliseconds since
++/// the page started (the shell's clock), first time each: `hanpan.status` reports them as
++/// `uiFontSteps` so a release check can tell where the face's time goes.
++static UI_FACE_STEPS: Mutex<Vec<(&'static str, f64)>> = Mutex::new(Vec::new());
++
++/// Hanpan: the shell reached `step` of the interface face at `at_ms` (kept the first time only).
++pub fn ui_face_step(step: &'static str, at_ms: f64) {
++    record_step(&mut UI_FACE_STEPS.lock().unwrap_or_else(PoisonError::into_inner), step, at_ms);
++}
++
++fn record_step(steps: &mut Vec<(&'static str, f64)>, step: &'static str, at_ms: f64) {
++    if !steps.iter().any(|(s, _)| *s == step) {
++        steps.push((step, at_ms));
++    }
++}
++
++/// Hanpan: the steps [`ui_face_step`] recorded, in the order they happened.
++pub fn ui_face_steps() -> Vec<(&'static str, f64)> {
++    UI_FACE_STEPS.lock().unwrap_or_else(PoisonError::into_inner).clone()
++}
++
+ /// The shell turns the section on (embedded mode, in a browser).
+ pub fn enable() {
+     let mut s = state();
+@@ -212,6 +233,18 @@ pub fn ui_face_for_platform(platform: &str) -> Option<&'static str> {
+     }
+ }
+ 
++/// Hanpan: the PostScript names of the PC face `family`'s Regular and Bold, so the shell reads
++/// just those two (`queryLocalFonts({postscriptNames})`) instead of listing every font first.
++/// Windows' Malgun Gothic files say `MalgunGothic` and `MalgunGothicBold`; a Mac's Apple SD Gothic
++/// Neo collection says `AppleSDGothicNeo-Regular` and `AppleSDGothicNeo-Bold`.
++pub fn ui_face_postscript(family: &str) -> Option<(&'static str, &'static str)> {
++    match family {
++        "Malgun Gothic" => Some(("MalgunGothic", "MalgunGothicBold")),
++        "Apple SD Gothic Neo" => Some(("AppleSDGothicNeo-Regular", "AppleSDGothicNeo-Bold")),
++        _ => None,
++    }
++}
++
+ /// Hanpan: `family` as the PC's list names it, if it is there.
+ pub fn ui_face_in_listing(families: &[String], family: &str) -> Option<String> {
+     families.iter().find(|f| f.eq_ignore_ascii_case(family)).cloned()
+@@ -535,6 +568,28 @@ pub(crate) mod hanpan_ui_font_tests {
+         }
+     }
+ 
++    /// Hanpan (review fix): the face is read by its PostScript names, without listing every font.
++    #[test]
++    fn every_pc_face_has_its_regular_and_bold_postscript_names() {
++        assert_eq!(ui_face_postscript("Malgun Gothic"), Some(("MalgunGothic", "MalgunGothicBold")));
++        assert_eq!(ui_face_postscript("Apple SD Gothic Neo"), Some(("AppleSDGothicNeo-Regular", "AppleSDGothicNeo-Bold")));
++        for p in ["Windows", "macOS"] {
++            let face = ui_face_for_platform(p).unwrap();
++            assert!(ui_face_postscript(face).is_some(), "{face}");
++        }
++        assert_eq!(ui_face_postscript("NanumGothic"), None);
++    }
++
++    /// (On a list of its own: the process-wide steps would show in other tests' `hanpan.status`.)
++    #[test]
++    fn steps_are_kept_the_first_time_and_in_order() {
++        let mut steps = Vec::new();
++        record_step(&mut steps, "a", 10.0);
++        record_step(&mut steps, "b", 20.0);
++        record_step(&mut steps, "a", 30.0);
++        assert_eq!(steps, vec![("a", 10.0), ("b", 20.0)]);
++    }
++
+     #[test]
+     fn the_pc_face_is_only_asked_for_when_the_pc_lists_it() {
+         let listed: Vec<String> = ["Arial", "malgun gothic", "Segoe UI"].map(String::from).to_vec();

@@ -56,10 +56,14 @@ and with `--query "lang=ko&embedded=hanpan" --checks embedded-with-lang,save-cle
 fresh page with no document: run `--checks embedded` on its own, in a separate run).
 Run `--query "embedded=hanpan" --checks theme,font` in a fresh page: `theme` switches to Hanpan dark
 and back to light with `hanpan.theme`, reads each back with `hanpan.status` and checks the menu bar
-is Hanpan's colour (#252525, #ffffff) in the app's screenshot; `font` waits up to 10 s after the
-app's first reply for the interface's Hangul face to be Malgun Gothic (read at startup without a
-click; on another OS NanumGothic is accepted) and prints how long after that first reply the face
-arrived (the first frames draw Hangul in NanumGothic until then).
+is Hanpan's colour (#252525, #ffffff) in the app's screenshot; `font` passes when the interface's
+Hangul face is applied and reported within 60 s of the app's first reply (Windows: Malgun Gothic,
+read at startup without a click; Mac: Apple SD Gothic Neo, or NanumGothic, the fallback; elsewhere
+NanumGothic). It prints when the face arrived and the app's own steps (`uiFontSteps` from
+`hanpan.status`: asked, PC fonts queried, files read, held, installed, first frame, in ms since the
+page started), and warns, without failing, when the face came more than 300 ms after the app's
+first reply (the first screen then drew NanumGothic). Judge that timing on an idle PC: run the
+smoke with no build or other heavy work running, since a busy CPU stretches it by seconds.
 Also run `--query "embedded=hanpan" --checks host-save` (Save, Save As and Print ask the host and
 write nothing themselves) and, for PhotoCraft, `--checks export-psd` (the layered document for
 Hanpan's recovery copies).

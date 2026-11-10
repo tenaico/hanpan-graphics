@@ -181,3 +181,8 @@ test('newFilesOfPatch: the files a patch creates, with either line ending', () =
   ].join('\r\n')
   assert.deepEqual(newFilesOfPatch(patch), ['crates/ui-egui/src/embedded.rs'])
 })
+
+test('a page API rejection naming the app is a finding: Hanpan shows it in the AI panel', () => {
+  const rs = '        let _ = reject.call1(&JsValue::NULL, &js_sys::Error::new("PhotoCraft has stopped"));'
+  assert.equal(scanAppName('photo', 'apps/photocraft-web/src/api.rs', rs, ALLOWED.photo).length, 1)
+})

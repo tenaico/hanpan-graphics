@@ -22,7 +22,9 @@ const TYPES = {
   '.txt': 'text/plain',
   '.ico': 'image/x-icon',
 }
-const report = (check, ok, detail) => process.stdout.write(`SMOKE ${JSON.stringify({ check, ok, detail })}\n`)
+// `warning`: the check passed, but something is worth a look (a timing over its target)
+const report = (check, ok, detail, warning) =>
+  process.stdout.write(`SMOKE ${JSON.stringify({ check, ok, detail, ...(warning ? { warning } : {}) })}\n`)
 
 protocol.registerSchemesAsPrivileged([
   { scheme: 'hgsmoke', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } },
@@ -71,7 +73,7 @@ app.whenReady().then(async () => {
     }
     const panics = consoleLines.filter((l) => /panicked/.test(l))
     if (panics.length) result = { ok: false, detail: `panic: ${panics[0].slice(0, 300)}` }
-    report(check, result.ok, result.detail)
+    report(check, result.ok, result.detail, result.warning)
     try {
       await writeFile(join(opts.out, `smoke-${check}.png`), (await win.webContents.capturePage()).toPNG())
     } catch {}

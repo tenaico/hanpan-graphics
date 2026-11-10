@@ -55,4 +55,5 @@ if (r.status !== 0 || failed.length || missing.length) {
   console.error(`[${opts.app}] smoke failed: ${names.join(', ') || `electron exit ${r.status}`}`)
   process.exit(1)
 }
+for (const w of results.filter((x) => x.warning)) console.log(`[${opts.app}] warning (${w.check}): ${w.warning}`)
 console.log(`[${opts.app}] smoke passed: ${opts.checks.join(', ')}`)

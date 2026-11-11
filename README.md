@@ -77,3 +77,6 @@ The Linux CI smoke runs on a software renderer and only warns.
 Then publish the draft, either on the release page (**Edit** → **Publish release**) or with
 `gh release edit <tag> --draft=false`. If the smoke fails, delete the draft
 (`gh release delete <tag> --cleanup-tag`), fix, bump `hanpanRev` in `pins.json` and run again.
+Both apps carry the same `hanpanRev` and are released together. h8 = h7 plus the photo dock gap
+fix (`patches/photo/0015-hanpan-dock-gutter.patch`; see `CHANGES-photo.md`); h7 was drafted but
+never published.

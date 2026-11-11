@@ -1,0 +1,57 @@
+diff --git a/crates/ui-egui/src/panels/panel_docking.rs b/crates/ui-egui/src/panels/panel_docking.rs
+index d71d483dd04a5df8f016b9f5568954ab40e2d4c4..2bcef446f3f87fdde06d2782615cc199c79a8f55 100644
+--- a/crates/ui-egui/src/panels/panel_docking.rs
++++ b/crates/ui-egui/src/panels/panel_docking.rs
+@@ -587,6 +587,12 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+     {
+         dock = dock.native_input_hook(native_input_hook(ui.ctx()));
+     }
++    // Hanpan: the layout's gaps (the 4 pt one between the canvas and the dock) are not painted
++    // by the dock; under the Hanpan themes fill them with the chrome instead of the window's
++    // near-black clear colour.
++    if let Some(fill) = t.dock_gap_fill() {
++        ui.painter().rect_filled(ui.max_rect(), 0.0, fill);
++    }
+     let mut commands = Vec::new();
+     let strip = style.tab_height;
+     let card: std::collections::HashSet<String> =
+diff --git a/crates/ui-egui/src/theme/hanpan.rs b/crates/ui-egui/src/theme/hanpan.rs
+index b7fdc45fae7e953a2cf4e1b7e67e19a2614a0431..60dbdb0dd4552d0b0c176b08a0cf0a6d927927d8 100644
+--- a/crates/ui-egui/src/theme/hanpan.rs
++++ b/crates/ui-egui/src/theme/hanpan.rs
+@@ -113,4 +113,16 @@ impl Tokens {
+             _ => None,
+         }
+     }
++
++    /// Hanpan: what fills the gaps the docking layout leaves between the canvas (with its icon
++    /// rail) and the dock, and between dock columns. In the Hanpan themes it is the chrome, so a
++    /// gap reads as part of the rail beside it and the dock's own border is the only line there,
++    /// as in the AI Word tab; `None` paints nothing and leaves the window's clear colour showing,
++    /// as before.
++    pub fn dock_gap_fill(&self) -> Option<Color32> {
++        match self.kind {
++            ThemeKind::HanpanLight | ThemeKind::HanpanDark => Some(self.chrome),
++            _ => None,
++        }
++    }
+ }
+diff --git a/crates/ui-egui/src/theme/tests.rs b/crates/ui-egui/src/theme/tests.rs
+index d81d7beec2352f823215d3c1946ac7e82533ea34..3c47a606564dc0b0f359b8c3782aff29b4cded13 100644
+--- a/crates/ui-egui/src/theme/tests.rs
++++ b/crates/ui-egui/src/theme/tests.rs
+@@ -473,3 +473,14 @@ fn hanpan_status_bar_and_menu_bar_border_match_word() {
+         assert_eq!(t.menu_bar_border(), None, "{kind:?}");
+     }
+ }
++
++#[test]
++fn hanpan_dock_gap_is_the_chrome() {
++    let light = Tokens::for_kind(ThemeKind::HanpanLight);
++    assert_eq!(light.dock_gap_fill(), Some(hex(0xffffff)));
++    let dark = Tokens::for_kind(ThemeKind::HanpanDark);
++    assert_eq!(dark.dock_gap_fill(), Some(hex(0x252525)));
++    for kind in ThemeKind::ALL {
++        assert_eq!(Tokens::for_kind(kind).dock_gap_fill(), None, "{kind:?}");
++    }
++}
